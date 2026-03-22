@@ -1,0 +1,12 @@
+fastapi>=0.111.0
+uvicorn>=0.30.1
+pydantic>=2.7.4
+pydantic-settings>=2.3.4
+sqlalchemy>=2.0.31
+asyncpg>=0.29.0
+alembic>=1.13.1
+litellm>=1.41.0
+langgraph>=0.1.5
+langchain-core>=0.2.10
+langchain>=0.2.6
+websockets>=12.0
