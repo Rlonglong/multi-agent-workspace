@@ -1,0 +1,142 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  --color-border: var(--border);
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+}
+
+:root {
+  --background: #050505;
+  --foreground: #ededed;
+  --border: rgba(255, 255, 255, 0.1);
+}
+
+@layer base {
+  * {
+    border-color: var(--border);
+  }
+
+  body {
+    background-color: var(--background);
+    color: var(--foreground);
+    overflow: hidden;
+  }
+}
+
+/* =========================================
+   PREMIUM DARK MESH BACKGROUND 
+   ========================================= */
+.premium-bg {
+  position: fixed;
+  inset: 0;
+  z-index: -10;
+  background-color: #050505;
+  background-image: 
+    radial-gradient(circle at 15% 50%, rgba(60, 40, 150, 0.35) 0%, transparent 55%),
+    radial-gradient(circle at 85% 30%, rgba(20, 100, 180, 0.35) 0%, transparent 55%);
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.premium-bg::before {
+  content: "";
+  position: absolute;
+  top: -50%;
+  left: -50%;
+  right: -50%;
+  bottom: -50%;
+  background: radial-gradient(circle at center, rgba(120, 60, 200, 0.25) 0%, transparent 45%);
+  animation: premiumFloat 25s ease-in-out infinite alternate;
+}
+
+@keyframes premiumFloat {
+  0% { transform: translate(0, 0) scale(1); }
+  100% { transform: translate(12%, 18%) scale(1.05); }
+}
+
+/* =========================================
+   ULTRA-REALISTIC SPACE BACKGROUND
+   ========================================= */
+.stars-bg {
+  position: fixed;
+  inset: -5%;
+  z-index: -9;
+  background-color: #040406;
+  background-image: url('https://images.unsplash.com/photo-1506318137071-a8e063b4bec0?q=80&w=3000&auto=format&fit=crop');
+  background-size: cover;
+  background-position: center;
+  opacity: 0.85;
+  filter: contrast(1.15) brightness(0.85);
+  pointer-events: none;
+  animation: spacePan 40s ease-in-out infinite alternate;
+}
+
+@keyframes spacePan {
+  0% { transform: scale(1) translate(0, 0); }
+  100% { transform: scale(1.3) translate(-3%, 4%); }
+}
+
+/* =========================================
+   SHOOTING STARS (METEORS)
+   ========================================= */
+.meteor-shower {
+  position: absolute;
+  top: 0; left: 0; right: 0; bottom: 0;
+  overflow: hidden;
+  z-index: -8;
+  pointer-events: none;
+}
+.meteor {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  background: #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.1), 0 0 0 6px rgba(255, 255, 255, 0.1), 0 0 15px rgba(255, 255, 255, 1);
+  animation: meteorFall 6s ease-in-out infinite;
+  opacity: 0;
+}
+.meteor::before {
+  content: '';
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 150px;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(255,255,255,0.8), transparent);
+  right: 0;
+}
+@keyframes meteorFall {
+  0% { transform: translateX(120vw) translateY(-40vh) rotate(-45deg); opacity: 1; }
+  15% { opacity: 0; }
+  100% { transform: translateX(-50vw) translateY(130vh) rotate(-45deg); opacity: 0; }
+}
+
+.meteor-1 { top: 5%; right: 10%; animation-delay: 3s; animation-duration: 5s; }
+.meteor-2 { top: -10%; right: -20%; animation-delay: 11s; animation-duration: 8s; }
+.meteor-3 { top: 30%; right: -30%; animation-delay: 22s; animation-duration: 6s; }
+
+/* Input glowing border on focus */
+@keyframes input-glow {
+  0% { border-color: rgba(99, 102, 241, 0.4); }
+  50% { border-color: rgba(99, 102, 241, 0.8); box-shadow: 0 0 25px rgba(99, 102, 241, 0.2); }
+  100% { border-color: rgba(99, 102, 241, 0.4); }
+}
+
+textarea:focus {
+  outline: none;
+  animation: input-glow 3s ease-in-out infinite;
+}
+
+/* Scrollbar hiding */
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
