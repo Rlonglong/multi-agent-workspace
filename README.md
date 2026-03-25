@@ -17,6 +17,10 @@ This project uses a Next.js frontend and a FastAPI backend connected over HTTP a
 - Separate `agent_workspace/` sandbox so generated deliverables do not modify the main app repo
 - Streaming UI with collapsible thinking blocks and execution status banner
 
+## Preview
+
+![Workspace UI](./docs/workspace-preview.png)
+
 ## Tech Stack
 
 - Frontend: Next.js 14, React 18, TypeScript, Tailwind CSS
