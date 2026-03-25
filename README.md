@@ -77,4 +77,4 @@ This repository is under active development. The workspace flow, queue handling,
 
 ## License
 
-MIT. See [LICENSE](/Volumes/X9 Pro/long/NYCU/大二上/AI/multi-agent-workspace/LICENSE).
+MIT. See [LICENSE](./LICENSE).
