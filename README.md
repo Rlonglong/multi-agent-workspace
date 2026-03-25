@@ -1,19 +1,80 @@
-# Multi-Agent LLM Web Workspace
+# Multi-Agent Workspace
 
-A highly interactive Web Application built with Next.js (Frontend) and FastAPI (Backend), highlighting an advanced Multi-Agent Workflow for simulating complete software development cycles.
+A web-based AI chat platform with two core modes:
 
-## Features
+- `Chat Mode`: a normal single-assistant chat experience with streaming output.
+- `Workspace Mode`: a PM-led multi-agent workflow for discovery, implementation planning, agent configuration, execution, and review.
 
-- **Base AI Chat**: Model selection, Custom System Prompts, Param Tuning, Streaming, and Context Memory.
-- **Phase 1: Product Discovery**: AI Architect/PM proposes architectures and an editable implementation guideline.
-- **Phase 2: Role-based Agents**: Task distribution among Frontend, Backend, QA, and Marketing agents. 
-- **Phase 3: Sandbox & QA**: Automated code execution in secure environments (Docker/venv Python) evaluated by QA agents.
-- **Phase 4: UX & Anti-Deadlock**: Collapsible code UI and Human-in-the-loop intervention preventing infinite AI-loop deadlocks.
+This project uses a Next.js frontend and a FastAPI backend connected over HTTP and WebSocket streams.
 
-## Structure
+## Highlights
 
-- `/frontend`: Next.js web application.
-- `/backend`: Python FastAPI server supporting Multi-Agent orchestration (e.g., using LangGraph) and Sandbox integration.
+- Normal chat interface with model selection and API key input
+- Workspace flow with `discovery -> implementation -> execution`
+- PM agent that gathers requirements before generating implementation guidelines
+- Editable agent roster with per-agent model and prompt configuration
+- Multi-agent execution queue with visible progress and stop control
+- Separate `agent_workspace/` sandbox so generated deliverables do not modify the main app repo
+- Streaming UI with collapsible thinking blocks and execution status banner
+
+## Tech Stack
+
+- Frontend: Next.js 14, React 18, TypeScript, Tailwind CSS
+- Backend: FastAPI, WebSocket streaming, LangGraph-based agent orchestration
+- Local models: Ollama
+- Cloud models: Gemini / OpenAI compatible model routing
+
+## Project Structure
+
+```text
+multi-agent-workspace/
+├── frontend/                # Next.js app
+├── backend/                 # FastAPI + agent orchestration
+├── agent_workspace/         # Isolated sandbox for generated project output
+├── docs/                    # Project docs
+└── README.md
+```
 
 ## Getting Started
-*Ensure you copy `.env.example` to `.env` in both `frontend` and `backend` directories and supply your API Keys before starting.*
+
+### 1. Frontend
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Frontend runs at [http://localhost:3000](http://localhost:3000).
+
+### 2. Backend
+
+```bash
+cd backend
+./venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+
+Backend health check:
+
+```bash
+curl http://127.0.0.1:8000/api/health
+```
+
+### 3. Local Models with Ollama
+
+If you want to use local models, start Ollama first and make sure your models are available.
+
+## Security Notes
+
+- Do not commit real API keys.
+- Keep `.env` and local secret files out of version control.
+- This repo only includes example env files and client-side key entry UI.
+- Generated agent output is intended to stay inside `agent_workspace/`.
+
+## Current Status
+
+This repository is under active development. The workspace flow, queue handling, stop control, and isolated agent sandbox are implemented, but some generated-project paths and older experimental files may still be present locally during development.
+
+## License
+
+MIT. See [LICENSE](/Volumes/X9 Pro/long/NYCU/大二上/AI/multi-agent-workspace/LICENSE).
