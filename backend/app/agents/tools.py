@@ -2,9 +2,12 @@ from langchain_core.tools import tool
 import os
 import subprocess
 import tempfile
+import shutil
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-WORKSPACE_DIR = os.path.abspath(os.getenv("AGENT_WORKSPACE_DIR", REPO_ROOT))
+WORKSPACE_DIR = os.path.abspath(
+    os.getenv("AGENT_WORKSPACE_DIR", os.path.join(REPO_ROOT, "agent_workspace"))
+)
 os.makedirs(WORKSPACE_DIR, exist_ok=True)
 
 
@@ -15,11 +18,46 @@ def resolve_workspace_path(filepath: str) -> str:
         raise ValueError("Refusing to write outside workspace root.")
     return full_path
 
+
+def cleanup_workspace_files(filepaths: list[str]) -> list[str]:
+    removed: list[str] = []
+    for filepath in filepaths or []:
+        try:
+            full_path = resolve_workspace_path(filepath)
+        except Exception:
+            continue
+        if os.path.isfile(full_path):
+            os.remove(full_path)
+            removed.append(filepath)
+            parent = os.path.dirname(full_path)
+            while parent.startswith(WORKSPACE_DIR) and parent != WORKSPACE_DIR:
+                try:
+                    os.rmdir(parent)
+                except OSError:
+                    break
+                parent = os.path.dirname(parent)
+        elif os.path.isdir(full_path):
+            shutil.rmtree(full_path, ignore_errors=True)
+            removed.append(filepath)
+    return removed
+
+
+def reset_workspace_dir() -> None:
+    for entry in os.listdir(WORKSPACE_DIR):
+        full_path = os.path.join(WORKSPACE_DIR, entry)
+        if os.path.isdir(full_path):
+            shutil.rmtree(full_path, ignore_errors=True)
+        else:
+            try:
+                os.remove(full_path)
+            except FileNotFoundError:
+                pass
+
 @tool
 def write_code_file(filepath: str, content: str) -> str:
     """
-    Save generated code to the project workspace directory.
-    Use this to persist the Frontend and Backend components you create.
+    Save generated code to the isolated agent workspace directory.
+    This workspace is separate from the host app repo.
     """
     full_path = resolve_workspace_path(filepath)
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
@@ -30,7 +68,7 @@ def write_code_file(filepath: str, content: str) -> str:
 @tool
 def read_code_file(filepath: str) -> str:
     """
-    Read an existing codebase file from the workspace.
+    Read an existing file from the isolated agent workspace.
     """
     full_path = resolve_workspace_path(filepath)
     try:

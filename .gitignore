@@ -43,6 +43,16 @@ venv.bak/
 # Sandbox / Tmp
 /sandbox/tmp/
 *.log
+agent_workspace/
+client/
+server/
+CTO_Technical_Specification.md
+frontend.log
+frontend/tsconfig.tsbuildinfo
+package.json
+requirements.txt
+postcss.config.js
+tailwind.config.js
 
 # OS
 .DS_Store

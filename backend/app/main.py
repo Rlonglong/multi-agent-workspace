@@ -1,6 +1,7 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+from pydantic import BaseModel
 from app.core.db import init_db
 import uvicorn
 import json
@@ -14,6 +15,13 @@ except ImportError:
 from app.agents.state import WorkspaceState
 from app.agents.graph import graph, build_strict_agent_prompt
 from app.agents.llm_router import get_llm
+
+GRAPH_RUNTIME_CONFIG = {"recursion_limit": 100}
+STOP_REQUESTED: set[str] = set()
+
+
+class StopExecutionPayload(BaseModel):
+    session_id: str
 
 
 def normalize_content(raw_content):
@@ -82,13 +90,13 @@ def normalize_execution_agent_configs(agent_configs, workspace_model: str = "", 
             pm_key = (agent.get("apiKey") or "").strip()
             break
 
-    unified_model = pm_model or (workspace_model or "").strip() or "ollama/qwen2.5"
-    unified_key = (pm_key or fallback_key or "").strip()
+    default_model = pm_model or (workspace_model or "").strip() or "ollama/qwen2.5"
+    default_key = (pm_key or fallback_key or "").strip()
     normalized = []
     for agent in configs:
         role = (agent.get("role") or "").strip()
-        model = unified_model
-        key = unified_key
+        model = (agent.get("model") or "").strip() or default_model
+        key = (agent.get("apiKey") or "").strip() or default_key
         if model.startswith("ollama/"):
             key = ""
         normalized.append({
@@ -97,7 +105,7 @@ def normalize_execution_agent_configs(agent_configs, workspace_model: str = "", 
             "model": model,
             "apiKey": key,
         })
-    return normalized, unified_model, unified_key
+    return normalized, default_model, default_key
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -124,13 +132,25 @@ app.add_middleware(
 async def health_check():
     return {"status": "healthy", "service": "multi-agent-backend"}
 
+
+@app.post("/api/execution/stop")
+async def stop_execution(payload: StopExecutionPayload):
+    session_id = (payload.session_id or "").strip()
+    if session_id:
+        STOP_REQUESTED.add(session_id)
+    return {"status": "ok", "stopping": bool(session_id), "session_id": session_id}
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
+    session_id = ""
     try:
         # 1. Receive the initial payload from the Next.js frontend
         raw_data = await websocket.receive_text()
         payload = json.loads(raw_data)
+        session_id = str(payload.get("session_id") or "").strip()
+        if session_id:
+            STOP_REQUESTED.discard(session_id)
 
         # 2. Inject API key into environment so LiteLLM can pick it up natively
         api_key = payload.get("api_key", "")
@@ -230,8 +250,27 @@ async def websocket_endpoint(websocket: WebSocket):
 
         # 5. Stream events from the LangGraph graph
         content_was_sent = False
+        stopped_early = False
 
-        async for event in graph.astream_events(state, version="v2"):
+        async for event in graph.astream_events(state, config=GRAPH_RUNTIME_CONFIG, version="v2"):
+            if session_id and session_id in STOP_REQUESTED:
+                STOP_REQUESTED.discard(session_id)
+                stopped_early = True
+                try:
+                    await websocket.send_text(json.dumps({
+                        "type": "replace",
+                        "content": "⏹️ 已停止這一輪 execution。",
+                        "node": "System Interface",
+                        "stage": state.get("stage"),
+                        "execution_started": state.get("execution_started"),
+                        "execution_queue": state.get("execution_queue"),
+                        "execution_cursor": state.get("execution_cursor"),
+                    }))
+                    await websocket.send_text(json.dumps({"type": "finish"}))
+                except Exception:
+                    pass
+                break
+
             kind = event["event"]
             node_name = event.get("name", "")
 
@@ -269,11 +308,14 @@ async def websocket_endpoint(websocket: WebSocket):
                         }))
                         content_was_sent = True
 
+        if stopped_early:
+            return
+
         # ── Fallback: if nothing was ever sent, invoke graph once more ──
         if not content_was_sent:
             print("[WS FALLBACK] No content was streamed – running graph.ainvoke as fallback")
             try:
-                result = await graph.ainvoke(state)
+                result = await graph.ainvoke(state, config=GRAPH_RUNTIME_CONFIG)
                 if result and isinstance(result, dict):
                     msgs = result.get("messages", [])
                     # Send only NEW messages (skip the ones sent by the user)
@@ -320,7 +362,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 new_guideline = edit_payload.get("content", "")
                 state["guideline"] = new_guideline
                 state["guideline_editable"] = False
-                async for event in graph.astream_events(state, version="v2"):
+                async for event in graph.astream_events(state, config=GRAPH_RUNTIME_CONFIG, version="v2"):
                     kind = event["event"]
                     node_name = event.get("name", "")
                     if kind == "on_chat_model_stream":
@@ -372,6 +414,8 @@ async def websocket_endpoint(websocket: WebSocket):
         except Exception:
             pass  # client may have already disconnected
     finally:
+        if session_id:
+            STOP_REQUESTED.discard(session_id)
         try:
             await websocket.close()
         except Exception:

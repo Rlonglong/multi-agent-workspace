@@ -14,7 +14,7 @@ from typing import Literal
 from app.agents.state import WorkspaceState, AgentConfig
 from app.agents.llm_router import get_llm
 from langgraph.prebuilt import ToolNode, tools_condition
-from app.agents.tools import write_code_file, read_code_file, execute_playwright_qa
+from app.agents.tools import write_code_file, read_code_file, execute_playwright_qa, reset_workspace_dir
 
 # Define the shared toolkit available to all engineering agents
 engineering_tools = [write_code_file, read_code_file, execute_playwright_qa]
@@ -72,24 +72,83 @@ def extract_write_code_actions(text: str) -> list[dict]:
     if not text:
         return actions
 
+    def collect_actions(parsed):
+        if isinstance(parsed, list):
+            for item in parsed:
+                collect_actions(item)
+            return
+        if not isinstance(parsed, dict):
+            return
+        if parsed.get("name") == "write_code_file" and isinstance(parsed.get("arguments"), dict):
+            actions.append(parsed)
+            return
+        if "filepath" in parsed and "content" in parsed:
+            actions.append({
+                "name": "write_code_file",
+                "arguments": {
+                    "filepath": parsed.get("filepath"),
+                    "content": parsed.get("content"),
+                },
+            })
+            return
+        if isinstance(parsed.get("writes"), list):
+            collect_actions(parsed.get("writes"))
+
+    candidates: list[str] = []
+    for match in re.finditer(r"```(?:json|javascript|typescript|text)?\s*([\s\S]*?)```", text, re.DOTALL):
+        candidates.append(match.group(1).strip())
+    if text.strip().startswith("{") or text.strip().startswith("["):
+        candidates.append(text.strip())
+
+    # Handle multiple types of markdown blocks and loose JSON
     patterns = [
-        r'```json\s*(\{\s*"name"\s*:\s*"write_code_file".*?\})\s*```',
-        r'(\{\s*"name"\s*:\s*"write_code_file".*?\})',
+        r'(\{\s*"name"\s*:\s*"write_code_file"[^\}]*?"arguments"\s*:\s*\{.*?\}.*?\})',
+        r'(\[\s*\{[\s\S]*?"filepath"\s*:\s*".*?[\s\S]*?\}\s*\])',
     ]
     for pattern in patterns:
         for match in re.finditer(pattern, text, re.DOTALL):
-            candidate = match.group(1).strip()
+            candidates.append(match.group(1).strip())
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        parsed = None
+        for attempt in (candidate, candidate.replace("'", '"')):
             try:
-                parsed = json.loads(candidate)
+                parsed = json.loads(attempt)
+                break
             except Exception:
-                continue
-            if isinstance(parsed, dict) and parsed.get("name") == "write_code_file":
-                actions.append(parsed)
-    return actions
+                parsed = None
+        if parsed is None:
+            continue
+        collect_actions(parsed)
+    
+    # deduplicate by filepath if possible
+    unique_actions = []
+    seen_paths = set()
+    for act in actions:
+        args = act.get("arguments", {})
+        if isinstance(args, dict):
+            path = args.get("filepath")
+            if path and path not in seen_paths:
+                seen_paths.add(path)
+                unique_actions.append(act)
+    return unique_actions
 
 
 def strip_thinking_blocks(text: str) -> str:
     return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
+
+
+def extract_recent_written_files(messages: list) -> list[str]:
+    found: list[str] = []
+    for message in messages[-8:]:
+        content = normalize_content(getattr(message, "content", ""))
+        for match in re.finditer(r"Successfully wrote file:\s*(.+)", content):
+            path = match.group(1).strip()
+            if path and path not in found:
+                found.append(path)
+    return found
 
 
 def contains_cjk(text: str) -> bool:
@@ -117,6 +176,14 @@ def is_engineering_role(role: str) -> bool:
     return any(keyword in lowered for keyword in ["cto", "engineer", "developer", "frontend", "backend", "fullstack", "tech", "platform", "infra"])
 
 
+def requires_file_delivery(role: str) -> bool:
+    lowered = (role or "").lower()
+    return any(
+        keyword in lowered
+        for keyword in ["frontend", "backend", "fullstack", "developer", "engineer", "devops", "platform", "infra"]
+    ) and not any(keyword in lowered for keyword in ["cto", "architect", "tech lead", "lead"])
+
+
 def role_priority(role: str) -> int:
     lowered = (role or "").lower()
     if is_reviewer_role(role):
@@ -132,19 +199,18 @@ def role_priority(role: str) -> int:
     return 2
 
 
-def fallback_model_for_role(role: str) -> str:
+def fallback_model_for_role(role: str, base_model: str = "gpt-4o") -> str:
     lowered = (role or "").lower()
+    # If base model is local, lean towards local fallbacks
+    is_local = "ollama" in base_model.lower()
+    
     if is_reviewer_role(role):
-        return "ollama/deepseek-r1:32b"
+        return "ollama/deepseek-r1:32b" if is_local else "gpt-4o"
     if any(keyword in lowered for keyword in ["backend", "server", "api"]):
-        return "ollama/qwen2.5"
+        return "ollama/qwen2.5" if is_local else base_model
     if any(keyword in lowered for keyword in ["frontend", "ui", "web"]):
-        return "ollama/qwen2.5"
-    if any(keyword in lowered for keyword in ["marketing", "growth", "seo", "sales"]):
-        return "ollama/llama3.2"
-    if any(keyword in lowered for keyword in ["cto", "architect", "tech lead", "lead", "pm"]):
-        return "ollama/qwen2.5"
-    return "ollama/qwen2.5"
+        return "ollama/qwen2.5" if is_local else base_model
+    return base_model
 
 
 def looks_like_problem_report(text: str) -> bool:
@@ -190,33 +256,33 @@ def role_execution_brief(role: str) -> dict[str, str]:
     lowered = (role or "").lower()
     if lowered == "pm":
         return {
-            "duty": "主持整個 execution，安排順序、處理阻塞、判斷何時回到 QA 驗收，直到有可交付成果。",
-            "deliverable": "每次回覆都要包含：目前完成項、下一位 agent、要他做的具體工作、是否需要 QA 或回修。",
-            "forbidden": "不要把工作丟回給使用者，不要只說空泛進度，不要在 execution 中重新做 discovery。",
+            "duty": "作為專案總監，負責主持整個 execution 階段。你的目標是產出成品，而不僅僅是協調。你需要排定最優執行的 queue，判斷每位 agent 的回報是否達到『可交付』標準。若發現實作有缺陷或 QA 不通過，你必須果斷安排回修（rem ediation）。",
+            "deliverable": "清晰的下一步指令。每次回覆必須包含：(1) 目前整體完成進度 (2) 下一位執行者 (3) 具體且可執行的 task 指令 (4) 指出目前的技術風險或未完成項目。",
+            "forbidden": "不要只做無意義的傳話，不要問使用者下一步該怎麼做（execution 階段由你主導），不要接受沒有實際檔案變更的工程回報。",
         }
     if any(keyword in lowered for keyword in ["qa", "review", "tester", "audit", "verify"]):
         return {
-            "duty": "逐條檢查 guideline、需求與實作結果，確認是否真的完成。",
-            "deliverable": "列出通過/未通過項目、缺失、影響、需要誰修、修完後要回來複檢。",
-            "forbidden": "不要因為看起來差不多就通過，不要跳過任何一條 guideline，不要自己改需求。",
+            "duty": "作為嚴苛的質量把關者。你必須對照 Guideline 進行『逐條』檢查。不只是看檔案是否存在，還要看邏輯是否正確、是否符合技術棧要求、是否有潛在 Bug。",
+            "deliverable": "(1) 通過項目清單 (2) 具體錯誤報告（需附上檔案路徑與錯誤原因）(3) 修復建議 (4) 最終結論：PASS 或 FAIL。任何 FAIL 都會觸發回修流程。",
+            "forbidden": "絕對禁止為了趕進度而給出模糊的『大致正確』，禁止跳過任何一條 Guideline 的檢查，禁止自己修改程式碼（請指派給開發者）。",
         }
     if any(keyword in lowered for keyword in ["frontend", "ui", "web"]):
         return {
-            "duty": "負責前端頁面、互動、UI 狀態與串流體驗的實作。",
-            "deliverable": "直接產出前端檔案修改，必要時讀既有檔案後再改，回報改了哪些檔案、可執行結果與剩餘缺口。",
-            "forbidden": "不要只描述會怎麼做，不要回報待辦清單取代實作，不要碰後端職責。",
+            "duty": "負責實現所有前端 UI、互動邏輯與狀態管理。你必須確保畫面的美觀與操作的流暢度。",
+            "deliverable": "(1) 實際的檔案寫入 (2) 前端功能說明 (3) 驗證方式（例如：開啟瀏覽器查看哪個頁面）。",
+            "forbidden": "不要回報『我打算做什麼』，請直接回報『我已經做了什麼並寫入檔案』，不要在沒有 read_code_file 的情況下盲目覆蓋既有檔案。",
         }
     if any(keyword in lowered for keyword in ["backend", "server", "api"]):
         return {
-            "duty": "負責 API、資料流、模型呼叫、串流處理與伺服器端邏輯。",
-            "deliverable": "直接產出後端檔案修改，必要時補上錯誤處理與路由邏輯，回報具體檔案、可執行驗證方式與剩餘缺口。",
-            "forbidden": "不要只交代計畫，不要要求 PM 幫你決定已明確的技術細節，不要碰前端版面職責。",
+            "duty": "負責伺服器端邏輯、API 設計、資料庫整合與串流處理。你必須確保後端的穩定性、安全性與高效能。",
+            "deliverable": "(1) 實際的檔案寫入 (2) API 接口定義與使用說明 (3) 驗證方式（例如：使用 curl 或測試指令查看回傳值）。",
+            "forbidden": "不要產出 placeholder 程式碼，不要要求 PM 決定技術細節（你自己就是專家），不要遺漏錯誤處理（error handling）。",
         }
     if any(keyword in lowered for keyword in ["cto", "architect", "tech lead", "lead"]):
         return {
-            "duty": "拆解技術工作、校正架構與依賴順序，協助 PM 安排工程先後。",
-            "deliverable": "給 PM 一個具體技術分工與先後順序，必要時產出架構相關檔案或設定。",
-            "forbidden": "不要取代 PM 做總控，不要只重複 guideline，不要要求其他角色等待沒有理由的指令。",
+            "duty": "負責架構設計與技術決策。你需要將複雜的 Guideline 拆解成具體、有先後依賴關係的任務，並確保所有 agent 的實作風格一致。",
+            "deliverable": "(1) 技術規格書細化 (2) 檔案結構定義 (3) 給各角色的具體實作邊界說明。",
+            "forbidden": "不要只是重複 Guideline，不要給出無法落地的抽象概念，不要在其他 agent 正在實作時隨意大幅改動底層架構。",
         }
     if any(keyword in lowered for keyword in ["devops", "platform", "infra"]):
         return {
@@ -235,6 +301,25 @@ def role_execution_brief(role: str) -> dict[str, str]:
         "deliverable": "提供可以直接採用的內容或檔案修改，並說明下一步由誰接手。",
         "forbidden": "不要只做口頭進度報告。",
     }
+
+
+def role_task_package(role: str) -> str:
+    lowered = (role or "").lower()
+    if lowered == "pm":
+        return "主持 execution、安排順序、判斷是否需要回修，並確保最後有可驗收成品。"
+    if any(keyword in lowered for keyword in ["cto", "architect", "tech lead", "lead"]):
+        return "一次完成技術規格收斂、檔案結構、模組邊界與實作順序，不要只給原則。"
+    if any(keyword in lowered for keyword in ["backend", "server", "api"]):
+        return "一次完成後端主要骨架：核心 API、服務層、錯誤處理、必要設定與可驗證啟動方式，不要只初始化空檔。"
+    if any(keyword in lowered for keyword in ["frontend", "ui", "web"]):
+        return "一次完成前端主要骨架：主頁面、核心元件、狀態串接與基本互動，不要只建立 placeholder。"
+    if any(keyword in lowered for keyword in ["qa", "review", "tester", "audit", "verify"]):
+        return "對照 guideline 逐條驗收，列出 PASS/FAIL 與具體缺口；若不通過，要明確指出要退回哪個角色修。"
+    if any(keyword in lowered for keyword in ["devops", "platform", "infra"]):
+        return "一次完成可執行的環境設定、啟動腳本、部署或本地運行說明。"
+    if any(keyword in lowered for keyword in ["marketing", "growth", "seo", "sales"]):
+        return "一次完成可直接上線的文案、SEO、對外說明頁內容。"
+    return "一次完成你職責範圍內最主要的一塊可交付成果，不要只做規劃。"
 
 
 def looks_like_guideline(text: str) -> bool:
@@ -270,102 +355,118 @@ def build_strict_agent_prompt(role: str, guideline: str) -> str:
     profile = role_execution_brief(role)
     role_lower = role.lower()
     execution_template = (
-        "【回報模板】\n"
-        "- 已完成：\n"
-        "- 變更檔案：\n"
-        "- 可驗證結果：\n"
-        "- 目前缺口：\n"
-        "- 建議下一位：\n"
+        "【交付報告模板】\n"
+        "- 當前任務狀態：已完成 / 部分完成 / 阻塞中\n"
+        "- 實際產出的檔案 (File Changes)：列出真實檔案路徑\n"
+        "- 本回合完成了什麼 (Completed Scope)：說明這一輪完整完成的工作包\n"
+        "- 如何驗證 (Verification Steps)：給出可操作檢查方式\n"
+        "- 剩餘待辦或風險 (Roadblocks)：只有真的存在才寫\n"
+        "- 建議下一位接手角色：\n"
     )
     if any(keyword in role_lower for keyword in ["qa", "review", "tester", "audit", "verify"]):
         execution_template = (
-            "【回報模板】\n"
-            "- 檢查項：\n"
-            "- 結果：通過 / 不通過\n"
-            "- 問題與證據：\n"
-            "- 需要誰修：\n"
-            "- 修完後是否需回複檢：\n"
+            "【驗收報告模板】\n"
+            "- 檢查項狀態表 (Guideline Checklist)：\n"
+            "  - [ ] 條目1：通過/不通過 (原因)\n"
+            "- 發現的具體問題 (Issues Found)：\n"
+            "- 應指派修復的角色 (Assigned To)：\n"
+            "- 最終判定 (Overall Verdict)：PASS / FAIL\n"
         )
-    elif any(keyword in role_lower for keyword in ["backend", "server", "api", "frontend", "ui", "web", "cto", "architect", "devops", "platform", "infra"]):
-        execution_template = (
-            "【回報模板】\n"
-            "- 已完成：\n"
-            "- 修改檔案：\n"
-            "- 實作內容：\n"
-            "- 驗證方式：\n"
-            "- 目前缺口：\n"
-            "- 下一步建議：\n"
-        )
-    guideline_excerpt = guideline[:3000] if guideline else "目前尚未提供 guideline，請先要求 PM 補足。"
+    
+    guideline_excerpt = guideline[:4000] if guideline else "目前尚未提供 guideline，請先要求 PM 補足。"
+    
     return (
-        f"你是 {role}。\n\n"
-        "【你的核心職責】\n"
+        f"你是專案中的 {role}。\n\n"
+        "【你的核心職責 (Your Duty)】\n"
         f"- {profile['duty']}\n\n"
-        "【你必須交付的東西】\n"
+        "【核心交付物 (Your Deliverables)】\n"
         f"- {profile['deliverable']}\n\n"
-        "【你不能做的事】\n"
+        "【本回合工作包 (Current Work Package)】\n"
+        f"- {role_task_package(role)}\n\n"
+        "【絕對禁忌 (Prohibited Actions)】\n"
         f"- {profile['forbidden']}\n\n"
-        "【回覆規則】\n"
-        "- 一律使用繁體中文。\n"
-        "- 回覆要短、清楚、可執行。\n"
-        "- 若資訊不足或需求不明，先回報 PM。\n"
-        "- 只做自己的角色工作，不要搶別人的工作。\n"
-        "- 不要講空話，不要輸出長篇教條。\n"
-        f"- {('QA 必須逐條檢查，不可用大致正確通過。' if any(keyword in role_lower for keyword in ['qa', 'review', 'tester', 'audit', 'verify']) else '工程角色必須真的修改檔案，不接受純規劃。')}\n"
+        "【工作原則 (Workflow Rules)】\n"
+        "- **全程使用繁體中文 (Traditional Chinese)**。\n"
+        "- **拒絕口頭報告**：如果你是工程角色，你必須產出實際的檔案內容。優先直接使用 `write_code_file` 工具；若無法使用工具，請輸出 Markdown JSON 區塊，例如：```json [{\"name\":\"write_code_file\",\"arguments\":{\"filepath\":\"backend/src/app.js\",\"content\":\"// code\"}}] ```。\n"
+        "- **一次完成一個完整工作包**：除非真的被阻塞，否則不要只做初始化、空檔案、待辦清單或『我接下來會做什麼』。\n"
+        "- **這一輪如果要求你建立多個檔案，就一次全部完成**：不要一個檔案講一次，也不要拆成很多小回合。\n"
+        "- **在獨立 agent workspace 中工作**：不要修改目前正在運行的主程式碼 repo。把 agent workspace 視為你這次專案的根目錄，在裡面建立自己的 `frontend/`、`backend/`、`docs/` 等內容。\n"
+        "- **先讀後寫 (Read Before Write)**：修改任何既有檔案前，請務必先使用 `read_code_file` 閱讀其內容，避免破壞現有邏輯。\n"
+        "- **回覆必須精確且可執行**：不要說『我會嘗試...』，應說『我已完成...』。若尚未完成，請明確說明阻塞原因。\n"
+        "- **QA 優先原則**：QA 角色必須極度挑剔，任何不符合 Guideline 的地方都必須標註 FAIL 並退回。\n\n"
+        "【交付報告要求】\n"
+        f"每次發言結束時，請務必按照以下模板回報進度：\n"
         f"{execution_template}\n"
-        "【實作要求】\n"
-        "- 如果你是工程角色，execution 階段不是做進度報告，而是要真的產出可落地的檔案修改。\n"
-        "- 若你是工程角色，優先使用 write_code_file / read_code_file 直接修改專案檔案。\n"
-        "- 若工具不可用，請用 JSON 片段明確輸出每個檔案的 filepath 與 content。\n"
-        "- 沒有任何檔案修改就不算完成。\n\n"
-        "【專案 Guideline】\n"
+        "【專案 Guideline 與 SRS參考】\n"
         f"{guideline_excerpt}"
     )
 
 
-def ensure_complete_agent_configs(suggested: list, pm_model_str: str, pm_prompt: str, guideline: str):
+def ensure_complete_agent_configs(suggested: list, pm_model_str: str, pm_prompt: str, guideline: str, current_configs: list = None):
     normalized = []
+    
+    # Create a mapping of current roles to their configs for merging
+    existing_map = {c.get("role"): c for c in (current_configs or []) if c.get("role")}
+    
     for item in suggested:
         if not isinstance(item, dict):
             continue
         role = item.get("role") or "Agent"
-        model = item.get("model") or "gpt-4o"
+        
+        # Merge logic: prioritize existing user selections for model/apiKey
+        existing = existing_map.get(role, {})
+        
+        model = item.get("model") or existing.get("model") or fallback_model_for_role(role, pm_model_str)
+        apiKey = item.get("apiKey") or existing.get("apiKey") or ""
+        
         prompt = normalize_content(item.get("prompt", "")).strip()
         if len(prompt) < 80:
-            prompt = build_strict_agent_prompt(role, guideline)
+            # If the suggested prompt is anemic, either keep existing or build new strict one
+            prompt = existing.get("prompt") or build_strict_agent_prompt(role, guideline)
+            
         normalized.append({
             "role": role,
             "model": model,
             "prompt": prompt,
-            "apiKey": item.get("apiKey", ""),
+            "apiKey": apiKey,
         })
 
+    # Ensure PM is always present and updated
+    pm_config = existing_map.get("PM", {})
     if not any(c.get("role") == "PM" for c in normalized):
         normalized.insert(0, {
             "role": "PM",
             "model": pm_model_str,
-            "prompt": build_strict_agent_prompt("PM", guideline),
-            "apiKey": "",
+            "prompt": pm_config.get("prompt") or build_strict_agent_prompt("PM", guideline),
+            "apiKey": pm_config.get("apiKey", ""),
         })
+    else:
+        # Update existing PM prompt if it was too short
+        for c in normalized:
+            if c["role"] == "PM" and len(c.get("prompt", "")) < 80:
+                c["prompt"] = pm_config.get("prompt") or build_strict_agent_prompt("PM", guideline)
+
     if not any(is_reviewer_role(c.get("role", "")) for c in normalized):
+        qa_role = "QA Engineer"
+        existing_qa = next((c for r, c in existing_map.items() if is_reviewer_role(r)), {})
         normalized.append({
-            "role": "QA Engineer",
-            "model": "ollama/deepseek-r1:32b",
-            "prompt": build_strict_agent_prompt("QA Engineer", guideline),
-            "apiKey": "",
+            "role": qa_role,
+            "model": existing_qa.get("model") or "ollama/deepseek-r1:32b",
+            "prompt": existing_qa.get("prompt") or build_strict_agent_prompt(qa_role, guideline),
+            "apiKey": existing_qa.get("apiKey", ""),
         })
     return normalized
 
 
-def build_default_agent_team(pm_model_str: str, guideline: str):
+def build_default_agent_team(pm_model_str: str, guideline: str, current_configs: list = None):
     defaults = [
         {"role": "PM", "model": pm_model_str},
-        {"role": "CTO", "model": "ollama/qwen2.5"},
-        {"role": "Frontend Developer", "model": "ollama/qwen2.5"},
-        {"role": "Backend Developer", "model": "ollama/qwen2.5"},
-        {"role": "QA Engineer", "model": "ollama/deepseek-r1:32b"},
+        {"role": "CTO", "model": fallback_model_for_role("CTO", pm_model_str)},
+        {"role": "Frontend Developer", "model": fallback_model_for_role("Frontend Developer", pm_model_str)},
+        {"role": "Backend Developer", "model": fallback_model_for_role("Backend Developer", pm_model_str)},
+        {"role": "QA Engineer", "model": fallback_model_for_role("QA Engineer", pm_model_str)},
     ]
-    return ensure_complete_agent_configs(defaults, pm_model_str, "", guideline)
+    return ensure_complete_agent_configs(defaults, pm_model_str, "", guideline, current_configs)
 
 
 def resolve_agent_role(target_role: str, agent_configs: list[dict]) -> str | None:
@@ -444,15 +545,15 @@ async def pm_node(state: WorkspaceState, config: RunnableConfig):
     user_explicitly_wants_finalize = any(
         keyword in latest_human_text
         for keyword in [
-            "需求已確認", "直接整理", "直接進入", "請直接", "start implementation", "go to implementation",
-            "proceed", "都可以看你", "你決定", "幫我生成", "請生成", "你處理", "開始吧", "開始", "可以開始",
-            "剩下的隨便", "隨便", "你安排", "看著辦", "照你", "你看著辦",
-            "好", "ok", "OK"
+            "需求已確認", "生成 implementation", "開始實作", "確認需求", "start implementation", "go to implementation",
+            "整理成初稿", "生成實作指南", "可以整理實例", "請生成實施指南", "你安排", "其餘由你", "你看著辦", "看你安排"
         ]
     )
-    if not user_explicitly_wants_finalize and latest_human_text.strip() in {"好", "可以", "開始", "ok", "OK"}:
+    # Only allow "go ahead" keywords if the PM just asked for permission
+    if not user_explicitly_wants_finalize:
+        is_generic_confirm = latest_human_text.strip() in {"好", "可以", "開始", "ok", "OK", "好的", "沒問題"}
         ai_lower = latest_ai_text.lower()
-        if any(k in ai_lower for k in ["implementation guideline", "實作指南", "實施指南", "agent", "代理"]):
+        if is_generic_confirm and any(k in ai_lower for k in ["整理", "implementation", "實作指南", "實施指南", "agent", "代理"]):
             user_explicitly_wants_finalize = True
     
     # Default PM model and prompt; allow overrides via agent configs
@@ -543,64 +644,55 @@ async def pm_node(state: WorkspaceState, config: RunnableConfig):
         if current_stage == "execution" and roles:
             planned_queue = execution_queue or roles
             if ((last_message_type == "human" and latest_human_text.startswith("[SYSTEM]")) or not execution_started):
+                reset_workspace_dir()
                 return {
                     "messages": [AIMessage(content=(
                         "我來主持這一輪 execution。\n"
                         f"執行順序：{format_role_queue(roles)}\n"
-                        "我會在每一位 agent 完成後決定下一步，最後一定會交給 QA 驗收。"
+                        "每位 agent 都必須一次完成自己角色的一個完整工作包，不要只交初始化或規劃。\n"
+                        "所有內容都只會寫入獨立的 agent workspace，不會修改主程式碼 repo。\n"
+                        "最後我一定會交給 QA 驗收。"
                     ))],
                     "next": roles[0],
                     "sender": "PM",
                     "stage": "execution",
                     "sidebar_visible": False,
+                    "artifacts": {},
                     "execution_started": True,
                     "execution_queue": roles,
                     "execution_cursor": 1 if len(roles) > 1 else len(roles),
+                    "extra": {"delivery_failures": {}},
                 }
-            if last_message_type == "human":
-                return {
-                    "messages": [AIMessage(content=(
-                        "收到你在 execution 中的新指示，我會重新安排這一輪工作。\n"
-                        f"新的執行順序：{format_role_queue(roles)}\n"
-                        f"第一位先由 {roles[0]} 開始。"
-                    ))],
-                    "next": roles[0],
-                    "sender": "PM",
-                    "stage": "execution",
-                    "sidebar_visible": False,
-                    "execution_started": True,
-                    "execution_queue": roles,
-                    "execution_cursor": 1 if len(roles) > 1 else len(roles),
-                }
-            next_role = state.get("next", "FINISH")
-            if next_role == "FINISH":
-                completion_text = truncate_for_pm(latest_ai_text, 260)
-                return {
-                    "messages": [AIMessage(content=(
-                        "我來做這一輪收尾。\n"
-                        f"目前 queue 已跑完：{format_role_queue(planned_queue)}\n"
-                        f"最後回報：{completion_text or '目前沒有額外回報，但此輪已完成。'}\n"
-                        "若使用者沒有新指示，這一輪就先到這裡。"
-                    ))],
-                    "next": "FINISH",
-                    "sender": "PM",
-                    "stage": "execution",
-                    "sidebar_visible": False,
-                    "execution_started": True,
-                    "execution_queue": planned_queue,
-                    "execution_cursor": len(planned_queue),
-                }
+            if last_message_type != "human":
+                next_role = state.get("next", "FINISH")
+                if next_role == "FINISH":
+                    completion_text = truncate_for_pm(latest_ai_text, 260)
+                    return {
+                        "messages": [AIMessage(content=(
+                            "我來做這一輪收尾。\n"
+                            f"目前 queue 已跑完：{format_role_queue(planned_queue)}\n"
+                            f"最後回報：{completion_text or '目前沒有額外回報，但此輪已完成。'}\n"
+                            "若使用者沒有新指示，這一輪就先到這裡。"
+                        ))],
+                        "next": "FINISH",
+                        "sender": "PM",
+                        "stage": "execution",
+                        "sidebar_visible": False,
+                        "execution_started": True,
+                        "execution_queue": planned_queue,
+                        "execution_cursor": len(planned_queue),
+                    }
             handoff_reason = truncate_for_pm(latest_ai_text)
             if is_reviewer_role(state.get("sender", "")) and looks_like_problem_report(latest_ai_text):
                 handoff_message = (
                     f"{state.get('sender', 'QA')} 發現需要修正的項目，我已重新安排修正流程。\n"
-                    f"接下來請 {next_role} 先處理，之後我會再帶回 QA 複檢。"
+                    f"接下來請 {next_role} 直接完成需要回修的完整工作包，之後我會再帶回 QA 複檢。"
                 )
             else:
                 handoff_message = (
                     f"收到 {state.get('sender', '上一位 agent')} 的回報。"
                     f"{' 摘要：' + handoff_reason if handoff_reason else ''}\n"
-                    f"下一位請 {next_role} 接手。"
+                    f"下一位請 {next_role} 接手，請直接完成你角色最主要的一塊可交付成果，不要只做初始化。"
                 )
             return {
                 "messages": [AIMessage(content=handoff_message)],
@@ -644,12 +736,19 @@ async def pm_node(state: WorkspaceState, config: RunnableConfig):
                     '  "name": "SuggestAgents",\n'
                     '  "arguments": {\n'
                     '    "guideline": "YOUR COMPREHENSIVE MARKDOWN GUIDELINE HERE",\n'
-                    '    "agents": [{"role": "Frontend", "model": "gpt-4o", "prompt": "..."}]\n'
+                    '    "agents": [{"role": "Frontend Developer", "prompt": "..."}]\n'
                     "  }\n"
                     "}\n"
                     "```\n"
-                    "如果還在對話，不要輸出這個 JSON。\n\n"
-                    "使用者訊息：\n\n"
+                    "**重要提示**：除非使用者要求更換模型，否則在 SuggestAgents 時「不要」指定 model 欄位，這會保留使用者目前在右側介面的自定義選擇。\n\n"
+                     "如果還在對話，不要輸出這個 JSON。\n\n"
+                     f"【當前進度】\n"
+                     f"- 正在執行專案：{current_stage}\n"
+                     f"- 角色順序：{' -> '.join(roles) if roles else '無'}\n"
+                     f"- 目前完成到第 {execution_cursor - 1} 位角色。\n"
+                     f"- 指派中的下一位角色：{state.get('next', '無')}\n"
+                     "你可以選擇回答使用者的問題，或使用 SwarmRouter 指派上述下一位 agent 開始工作。\n\n"
+                     "使用者訊息：\n\n"
                 )
                 
                 # Prepend the heavy instructions to the latest human message safely
@@ -669,8 +768,12 @@ async def pm_node(state: WorkspaceState, config: RunnableConfig):
                     "1. 一律使用繁體中文，回覆要短、清楚、可執行。\n"
                     f"2. 你有的專業角色：{roles}。\n"
                     f"3. 目前 stage = {current_stage}。如果是 execution，就先分派工作，不要再問使用者。\n"
-                    "4. 若要分派工作，用 SwarmRouter 或 ROUTE:rolename: message。\n"
-                    "5. 不要輸出冗長教條；直接說明要做什麼、遇到什麼問題、下一步是什麼。"
+                    f"4. 當前角色順序：{' -> '.join(roles) if roles else '無'}\n"
+                    f"5. 目前完成到第 {execution_cursor - 1} 位角色。指派中的下一位：{state.get('next', '無')}\n"
+                    "6. 若要分派工作，用 SwarmRouter 或 ROUTE:rolename: message。\n"
+                    "7. 不要輸出冗長教條；直接說明要做什麼、遇到什麼問題、下一步是什麼。\n"
+                    "8. 指派 agent 時，除非使用者要求，否則不要隨意指定模型模型 (model 欄位)，以保留使用者的自定義模型。\n"
+                    "9. 一次指派給工程師的任務可以多一點，一次再讓驗收者一起查驗，不需要頻繁呼叫其他agent。如果 PM 先前安排的 queue 沒有要更改，就不需要再叫 PM 出來主持，直接按照 queue 繼續執行。"
                 ))
                 # For non-local, bind_tools and astream
                 response_chunk = None
@@ -757,7 +860,7 @@ async def pm_node(state: WorkspaceState, config: RunnableConfig):
                     }
                 suggested = tc_args.get("agents", [])
                 guideline_content = normalize_content(tc_args.get("guideline", "No guideline generated."))
-                new_agents = ensure_complete_agent_configs(suggested, pm_model_str, pm_prompt, guideline_content)
+                new_agents = ensure_complete_agent_configs(suggested, pm_model_str, pm_prompt, guideline_content, agent_configs)
                 
                 updates["stage"] = "implementation"
                 updates["sidebar_visible"] = False
@@ -770,19 +873,26 @@ async def pm_node(state: WorkspaceState, config: RunnableConfig):
                     "sender": "PM",
                     **updates,
                 }
-            elif tc["name"] == "SwarmRouter":
-                # Safely extract arguments (could be dict or string)
-                args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
-                next_node = args.get("next_step", "FINISH")
+            elif tc_name == "SwarmRouter":
+                args = tc.get("args")
+                if not isinstance(args, dict):
+                    # Fallback for weird argument formats
+                    try:
+                        args = json.loads(str(args)) if isinstance(args, str) else {}
+                    except:
+                        args = {}
+                
+                next_node = str(args.get("next_step", "FINISH"))
+                direct_msg = str(args.get("direct_message", ""))
+                
                 if next_node == "execution":
                     updates["stage"] = "execution"
                     updates["sidebar_visible"] = False
-                # Show only the direct message to the user, not the boilerplate prefix
-                direct_msg = args.get('direct_message', '')
+                
                 if next_node == "FINISH":
                     return {
                         "messages": [AIMessage(content=direct_msg)],
-                        "next": next_node,
+                        "next": "FINISH",
                         "sender": "PM",
                         **updates,
                     }
@@ -814,11 +924,12 @@ async def pm_node(state: WorkspaceState, config: RunnableConfig):
             }
 
     # If PM output is only a "I'm about to generate guideline + agents" preamble, convert it to a real implementation package.
+    # ONLY do this if the user already said they want to finalize or if it's clearly a guideline response.
     if (not tool_calls and plain_content and (not agent_configs or len(agent_configs) <= 1)
-            and looks_like_finalize_preamble(plain_content) and not looks_like_guideline(plain_content)):
+            and looks_like_finalize_preamble(plain_content) and user_explicitly_wants_finalize):
         forced_guideline = await force_generate_guideline(llm, pm_prompt, messages)
         if looks_like_guideline(forced_guideline):
-            fallback_agents = build_default_agent_team(pm_model_str, forced_guideline)
+            fallback_agents = build_default_agent_team(pm_model_str, forced_guideline, agent_configs)
             return {
                 "messages": [AIMessage(content=build_implementation_summary(forced_guideline, len(fallback_agents)))],
                 "guideline": forced_guideline,
@@ -870,7 +981,8 @@ async def worker_node(state: WorkspaceState, config: RunnableConfig):
     # We must remember who is currently active. If this is a loop-back from a ToolNode, `next` might still be the target role.
     # The active target role is typically stored in `next` by the PM, or in `sender` if it was already processing.
     active_messages = state.get("messages", [])
-    if active_messages and getattr(active_messages[-1], "type", "") == "tool":
+    looping_from_tools = bool(active_messages and getattr(active_messages[-1], "type", "") == "tool")
+    if looping_from_tools:
         target_role = state.get("sender")  # It's looping back to the sender
     else:
         target_role = state.get("next")
@@ -906,6 +1018,9 @@ async def worker_node(state: WorkspaceState, config: RunnableConfig):
     queue = execution_queue or [c["role"] for c in agent_configs if c.get("role") != "PM"]
     next_role = "FINISH"
     next_cursor = execution_cursor
+    artifacts = dict(state.get("artifacts") or {})
+    extra = dict(state.get("extra") or {})
+    delivery_failures = dict(extra.get("delivery_failures") or {})
     if state.get("stage") == "execution" and execution_started:
         await asyncio.sleep(0.45)
 
@@ -914,20 +1029,34 @@ async def worker_node(state: WorkspaceState, config: RunnableConfig):
         f"{target_config.get('prompt', '')}\n\n"
         "【回覆規則】\n"
         "1. 一律使用繁體中文。\n"
-        "2. 回覆要短、清楚、可執行。\n"
-        "3. 做完你的部分就直接回報 PM，不要延伸到其他角色。\n"
-        + ("\n4. 你是工程角色，請直接產出檔案修改或可執行的 write_code_file 指令，不要只做進度報告。" if is_engineering_role(resolved_target_role) else "")
+        "2. 回覆要清楚、可執行，不要空話。\n"
+        "3. 這一輪請一次完成一個完整工作包，不要只做初始化、待辦清單、規劃文件或 placeholder。\n"
+        "4. 如果這一輪需要建立多個檔案，請一次在同一輪全部完成，不要一個檔案交一次。\n"
+        "5. 完成你的部分後再回報 PM，不要搶做其他角色的工作。\n"
+        + ("\n6. 你是實作者角色：這一輪只能用兩種方式交付：(A) 直接觸發寫檔工具；或 (B) 回傳可解析的 write_code_file JSON。建議格式：```json [{\"name\":\"write_code_file\",\"arguments\":{\"filepath\":\"frontend/src/App.jsx\",\"content\":\"...\"}}]```。若你只輸出說明、計畫、待辦、進度、口頭報告，會直接視為失敗。" if requires_file_delivery(resolved_target_role) else "")
+        + ("\n6. 你是架構/協調角色，請直接交付可採用的決策、拆解或驗收結論，不要只說接下來要做什麼。" if is_engineering_role(resolved_target_role) and not requires_file_delivery(resolved_target_role) else "")
+        + ("\n7. 若你是 QA / Reviewer，必須逐條對照 guideline 驗收，並在不通過時明確點名要退回修正的角色。" if is_reviewer_role(resolved_target_role) else "")
     ))
 
-    async def invoke_with_model(model_llm, model_label: str):
+    async def invoke_with_model(model_llm, model_label: str, prefer_single_shot: bool = False):
         response_chunk = None
         stream_error = None
+        if prefer_single_shot:
+            try:
+                response = await model_llm.ainvoke([system_msg] + state["messages"], config=config)
+                return AIMessage(
+                    content=normalize_content(getattr(response, "content", "")),
+                    tool_calls=getattr(response, "tool_calls", None) or [],
+                ), None
+            except Exception as err:
+                stream_error = err
         try:
-            async for chunk in model_llm.astream([system_msg] + state["messages"], config=config):
-                if response_chunk is None:
-                    response_chunk = chunk
-                else:
-                    response_chunk += chunk
+            if not prefer_single_shot:
+                async for chunk in model_llm.astream([system_msg] + state["messages"], config=config):
+                    if response_chunk is None:
+                        response_chunk = chunk
+                    else:
+                        response_chunk += chunk
         except Exception as err:
             stream_error = err
             if "No generation chunks were returned" not in str(err) and "No generations found in stream" not in str(err):
@@ -935,13 +1064,20 @@ async def worker_node(state: WorkspaceState, config: RunnableConfig):
         if response_chunk is None:
             try:
                 response = await model_llm.ainvoke([system_msg] + state["messages"], config=config)
-                response_chunk = AIMessage(content=normalize_content(getattr(response, "content", "")))
+                response_chunk = AIMessage(
+                    content=normalize_content(getattr(response, "content", "")),
+                    tool_calls=getattr(response, "tool_calls", None) or [],
+                )
             except Exception as err:
                 return None, err if stream_error is None else stream_error
         return response_chunk, None
 
-    response_chunk, response_error = await invoke_with_model(worker_llm, primary_model)
-    fallback_model = fallback_model_for_role(target_role)
+    response_chunk, response_error = await invoke_with_model(
+        worker_llm,
+        primary_model,
+        prefer_single_shot=requires_file_delivery(resolved_target_role),
+    )
+    fallback_model = fallback_model_for_role(target_role, primary_model)
     if response_chunk is None and fallback_model and fallback_model != primary_model:
         await asyncio.sleep(0.25)
         fallback_llm = get_llm(fallback_model)
@@ -950,7 +1086,11 @@ async def worker_node(state: WorkspaceState, config: RunnableConfig):
                 fallback_llm = fallback_llm.bind_tools(engineering_tools)
             except Exception:
                 pass
-        response_chunk, fallback_error = await invoke_with_model(fallback_llm, fallback_model)
+        response_chunk, fallback_error = await invoke_with_model(
+            fallback_llm,
+            fallback_model,
+            prefer_single_shot=requires_file_delivery(resolved_target_role),
+        )
         response_error = fallback_error or response_error
 
     if response_chunk is None:
@@ -979,12 +1119,36 @@ async def worker_node(state: WorkspaceState, config: RunnableConfig):
 
     if target_config.get("model", "").startswith("ollama/"):
         content = normalize_content(getattr(response_chunk, "content", ""))
-        response_chunk = AIMessage(content=content)
+        response_chunk = AIMessage(content=content, tool_calls=getattr(response_chunk, "tool_calls", None) or [])
 
     response_text = normalize_content(getattr(response_chunk, "content", ""))
+    written_files: list[str] = []
     if state.get("stage") == "execution" and is_engineering_role(resolved_target_role):
+        if requires_file_delivery(resolved_target_role) and not getattr(response_chunk, "tool_calls", None):
+            repair_instruction = HumanMessage(content=(
+                "你上一則回覆沒有提供任何真正的寫檔結果。\n"
+                "現在禁止再輸出計畫、進度、解釋、條列摘要。\n"
+                "請直接做一件事：使用工具寫檔，或只輸出可解析的 write_code_file JSON。\n"
+                "如果這一輪需要多個檔案，請一次全部完成。\n"
+                "請優先用這種格式：```json\n"
+                "[\n"
+                "  {\"name\":\"write_code_file\",\"arguments\":{\"filepath\":\"backend/src/app.js\",\"content\":\"// code\"}},\n"
+                "  {\"name\":\"write_code_file\",\"arguments\":{\"filepath\":\"backend/src/routes/chatRoutes.js\",\"content\":\"// code\"}}\n"
+                "]\n"
+                "```\n"
+                "JSON 區塊後面可以再補 1 到 3 句你完成了什麼。"
+            ))
+            try:
+                repaired_raw = await worker_llm.ainvoke([system_msg] + state["messages"] + [repair_instruction], config=config)
+                response_chunk = AIMessage(
+                    content=normalize_content(getattr(repaired_raw, "content", "")),
+                    tool_calls=getattr(repaired_raw, "tool_calls", None) or [],
+                )
+                response_text = normalize_content(getattr(response_chunk, "content", ""))
+            except Exception:
+                pass
+
         write_actions = extract_write_code_actions(response_text)
-        written_files: list[str] = []
         for action in write_actions:
             args = action.get("arguments") if isinstance(action.get("arguments"), dict) else {}
             filepath = (args.get("filepath") or "").strip()
@@ -999,11 +1163,34 @@ async def worker_node(state: WorkspaceState, config: RunnableConfig):
                 written_files.append(filepath)
             except Exception as write_err:
                 written_files.append(f"{filepath} (write failed: {write_err})")
+        if looping_from_tools:
+            for path in extract_recent_written_files(state.get("messages", [])):
+                if path not in written_files:
+                    written_files.append(path)
         if written_files:
+            for path in written_files:
+                if "(write failed:" in path:
+                    continue
+                artifacts[path] = {"role": resolved_target_role}
+            delivery_failures.pop(resolved_target_role, None)
+            extra["delivery_failures"] = delivery_failures
             response_text = (
                 f"已落地實作檔案：{', '.join(written_files)}\n\n"
                 f"{strip_thinking_blocks(response_text)}"
             ).strip()
+            response_chunk = AIMessage(content=response_text)
+        elif requires_file_delivery(resolved_target_role):
+            failure_count = int(delivery_failures.get(resolved_target_role, 0)) + 1
+            delivery_failures[resolved_target_role] = failure_count
+            extra["delivery_failures"] = delivery_failures
+            summarized_report = strip_thinking_blocks(response_text).strip()
+            if not summarized_report:
+                summarized_report = "本輪沒有提供可驗證的檔案寫入內容，只留下口頭回報。"
+            response_text = (
+                f"【{resolved_target_role} 本輪回報】\n"
+                f"{summarized_report}\n\n"
+                "備註：目前系統尚未偵測到實際檔案寫入。這則回報會先交回 PM，後續可由 PM 或 QA 決定是否需要退回補做。"
+            )
             response_chunk = AIMessage(content=response_text)
     if state.get("stage") == "execution" and execution_started and looks_like_problem_report(response_text):
         current_role_lower = (resolved_target_role or "").lower()
@@ -1026,13 +1213,18 @@ async def worker_node(state: WorkspaceState, config: RunnableConfig):
                 next_role = queue[next_cursor]
                 next_cursor = next_cursor + 1
             else:
-                next_role = "FINISH"
+                # Finished the queue
+                next_role = "PM"  # Final handoff back to PM for closing or summary
                 next_cursor = len(queue)
+        else:
+            next_role = "PM"
 
     return {
         "messages": [response_chunk],
         "sender": resolved_target_role,
         "next": next_role,
+        "artifacts": artifacts,
+        "extra": extra,
         "stage": state.get("stage"),
         "sidebar_visible": state.get("sidebar_visible", False),
         "execution_started": state.get("execution_started", False),

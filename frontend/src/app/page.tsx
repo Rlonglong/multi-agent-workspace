@@ -218,6 +218,7 @@ export default function Home() {
   const isNearBottomRef = useRef(true);
   const [panelWidth, setPanelWidth] = useState(380);
   const panelResizeStartRef = useRef<{ x: number; width: number } | null>(null);
+  const [executionBannerCollapsed, setExecutionBannerCollapsed] = useState(false);
 
   // Phase 2: Focus lock on sidebar
   const [focusSidebar, setFocusSidebar] = useState(false);
@@ -328,6 +329,15 @@ export default function Home() {
   };
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
+  const executionQueue = currentSession?.execution_queue || [];
+  const executionCursor = currentSession?.execution_cursor || 0;
+  const activeExecutionIndex = executionQueue.length > 0
+    ? Math.min(Math.max(executionCursor - 1, 0), executionQueue.length - 1)
+    : -1;
+  const activeExecutionRole = activeExecutionIndex >= 0 ? executionQueue[activeExecutionIndex] : "";
+  const completedExecutionCount = executionQueue.length > 0
+    ? Math.min(Math.max(executionCursor - 1, 0), executionQueue.length)
+    : 0;
 
   // Intentional: this syncs session-local UI state only when the active session changes.
   useEffect(() => {
@@ -409,7 +419,23 @@ export default function Home() {
     isNearBottomRef.current = distanceFromBottom < 96;
   };
 
+  const requestExecutionStop = async () => {
+    if (!currentSessionId) return;
+    try {
+      await fetch("http://127.0.0.1:8000/api/execution/stop", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ session_id: currentSessionId }),
+      });
+    } catch (error) {
+      console.error("Failed to request execution stop", error);
+    }
+  };
+
   const stopCurrentResponse = () => {
+    if (currentSession?.mode === "workspace" && workspaceSocketRef.current) {
+      void requestExecutionStop();
+    }
     chatAbortControllerRef.current?.abort();
     chatAbortControllerRef.current = null;
     if (workspaceSocketRef.current && workspaceSocketRef.current.readyState === WebSocket.OPEN) {
@@ -593,6 +619,7 @@ export default function Home() {
 
         ws.onopen = () => {
           ws.send(JSON.stringify({
+            session_id: currentSessionId,
             messages: newMessages,
             agent_configs: outgoingAgentConfigs,
             mode: "workspace",
@@ -786,21 +813,11 @@ export default function Home() {
       const decoder = new TextDecoder();
       let assistantText = "";
       
-      const isNormalDeepSeek = currentSession?.model?.includes("deepseek-r1");
-
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-
-        if (isNormalDeepSeek && assistantText === "") {
-          assistantText = "<think>\n\n";
-          let tempChunk = decoder.decode(value, { stream: true });
-          tempChunk = tempChunk.replace("<think>", "").replace(/^\n/, "");
-          assistantText += tempChunk;
-        } else {
-          const chunk = decoder.decode(value, { stream: true });
-          assistantText += chunk;
-        }
+        const chunk = decoder.decode(value, { stream: true });
+        assistantText += chunk;
         if (assistantText.trim()) {
           hasAssistantSpeechStartedRef.current = true;
         }
@@ -1087,6 +1104,7 @@ export default function Home() {
                       setApiKey(e.target.value);
                       updateSession(currentSessionId, { apiKey: e.target.value });
                     }}
+                    className="w-[200px] bg-transparent text-white/85 placeholder-white/35 outline-none border-0 shadow-none"
                   />
                 </div>
               )}
@@ -1179,6 +1197,108 @@ export default function Home() {
           className="flex-1 overflow-y-auto w-full px-5 sm:px-8 relative z-20 scrollbar-hide"
         >
           <div className="max-w-4xl mx-auto py-10 space-y-8 min-h-full pb-8">
+            {currentSession.mode === "workspace" && stage === "execution" && executionQueue.length > 0 && (
+              <div className="sticky top-4 z-20 mb-3 flex justify-start">
+                <div className={`transition-all duration-300 ${executionBannerCollapsed ? "w-auto" : "w-full max-w-[760px]"}`}>
+                  {executionBannerCollapsed ? (
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setExecutionBannerCollapsed(false)}
+                        className="flex items-center gap-2 rounded-full border border-white/10 bg-black/45 px-3 py-2 backdrop-blur-xl shadow-[0_8px_24px_rgba(0,0,0,0.25)] text-left"
+                      >
+                        <div className={`h-2 w-2 rounded-full ${isLoading ? "bg-emerald-400 animate-pulse shadow-[0_0_12px_rgba(74,222,128,0.8)]" : "bg-white/25"}`} />
+                        <span className="text-[11px] font-black uppercase tracking-[0.22em] text-white/45">Queue</span>
+                        <span className="text-[12px] text-white/82 font-semibold">{activeExecutionRole || "Waiting"}</span>
+                        <span className="text-[11px] text-white/35">◀</span>
+                      </button>
+                      {isLoading && (
+                        <button
+                          type="button"
+                          onClick={stopCurrentResponse}
+                          className="flex items-center gap-2 rounded-full border border-red-400/25 bg-red-500/15 px-3 py-2 text-[11px] font-black uppercase tracking-[0.18em] text-red-100 shadow-[0_8px_24px_rgba(127,29,29,0.25)] transition-colors hover:bg-red-500/25"
+                        >
+                          <Square className="h-3.5 w-3.5 fill-current" />
+                          停止
+                        </button>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="rounded-[22px] border border-white/10 bg-[linear-gradient(180deg,rgba(10,16,24,0.82),rgba(7,10,16,0.62))] px-4 py-3 backdrop-blur-xl shadow-[0_14px_34px_rgba(0,0,0,0.28)]">
+                      <div className="flex flex-wrap items-start justify-between gap-3">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <div className={`h-2 w-2 rounded-full ${isLoading ? "bg-emerald-400 animate-pulse shadow-[0_0_10px_rgba(74,222,128,0.75)]" : "bg-white/25"}`} />
+                            <span className="text-[10px] font-black uppercase tracking-[0.24em] text-white/38">Execution Queue</span>
+                          </div>
+                          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                            <span className="text-[14px] font-semibold text-white/88">
+                              {activeExecutionRole ? `目前執行：${activeExecutionRole}` : "等待下一位 agent"}
+                            </span>
+                            <span className="rounded-full border border-white/8 bg-white/[0.04] px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-white/48">
+                              {isLoading ? "Running" : "Waiting"}
+                            </span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <div className="text-[12px] text-white/50 font-medium tabular-nums">
+                            {completedExecutionCount} / {executionQueue.length}
+                          </div>
+                          {isLoading && (
+                            <button
+                              type="button"
+                              onClick={stopCurrentResponse}
+                              className="rounded-full border border-red-400/25 bg-red-500/15 px-3 py-1.5 text-[10px] font-black uppercase tracking-[0.16em] text-red-100 shadow-[0_8px_24px_rgba(127,29,29,0.22)] transition-colors hover:bg-red-500/25"
+                            >
+                              停止執行
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => setExecutionBannerCollapsed(true)}
+                            className="rounded-full border border-white/8 bg-white/[0.04] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.16em] text-white/48 hover:bg-white/[0.08] hover:text-white/75"
+                          >
+                            Hide
+                          </button>
+                        </div>
+                      </div>
+
+                      <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
+                        <div
+                          className="h-full rounded-full bg-[linear-gradient(90deg,rgba(16,185,129,0.9),rgba(99,102,241,0.9))] transition-all duration-500"
+                          style={{ width: `${Math.max((completedExecutionCount / executionQueue.length) * 100, activeExecutionRole ? 8 : 0)}%` }}
+                        />
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {executionQueue.map((role, index) => {
+                          const isDone = index < completedExecutionCount;
+                          const isActive = index === activeExecutionIndex;
+                          const color = getAgentColor(role);
+                          return (
+                            <div
+                              key={`${role}-${index}`}
+                              className={`rounded-full border px-3 py-1.5 text-[11px] font-semibold tracking-[0.02em] transition-all ${
+                                isActive ? "shadow-[0_0_18px_rgba(255,255,255,0.08)] -translate-y-[1px]" : ""
+                              }`}
+                              style={{
+                                backgroundColor: isDone ? "rgba(16,185,129,0.14)" : (isActive ? color.bg : "rgba(255,255,255,0.025)"),
+                                borderColor: isDone ? "rgba(16,185,129,0.25)" : (isActive ? color.border : "rgba(255,255,255,0.07)"),
+                                color: isDone ? "#86efac" : (isActive ? color.text : "rgba(255,255,255,0.62)"),
+                              }}
+                            >
+                              {isDone ? "✓ " : isActive ? "→ " : ""}
+                              {role}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
             {currentSession.messages.length === 0 && (
               <div className="h-full flex flex-col items-center justify-center text-center mt-[15vh] space-y-6 opacity-95">
                 {currentSession.mode === "workspace" ? (
@@ -1294,7 +1414,11 @@ export default function Home() {
                             if (inThink) {
                               const isActive = i === parts.length - 1 && isLoading && m.id === currentSession.messages[currentSession.messages.length - 1]?.id;
                               return (
-                                <details key={`think-${i}`} className={`group mb-3 text-white/50 bg-black/20 rounded-xl p-3 text-[14px] shadow-inner transition-all duration-300 ${isActive ? 'thinking-border-active' : 'border border-white/5'}`} open={isActive ? true : undefined}>
+                                <details
+                                  key={`think-${i}`}
+                                  className={`group mb-3 text-white/50 bg-black/20 rounded-xl p-3 text-[14px] shadow-inner transition-all duration-300 ${isActive ? 'thinking-border-active' : 'border border-white/5'}`}
+                                  open={currentSession.mode === "workspace" ? isActive : false}
+                                >
                                   <summary className="cursor-pointer hover:text-white/80 transition-colors select-none font-semibold flex items-center justify-between h-[24px] list-none">
                                     {isActive ? (
                                       <span className="flex items-center gap-2 text-[#ff4d4d] drop-shadow-[0_0_8px_rgba(255,0,0,0.8)] font-mono">
@@ -1345,7 +1469,7 @@ export default function Home() {
 
                           return (
                             <div className="flex flex-col">
-                              <div className={`transition-all duration-500 overflow-hidden relative ${isAgentBubble && !isExpanded && !containsCodeBlock ? 'max-h-[120px]' : ''}`}>
+                              <div className={`transition-all duration-500 overflow-hidden relative ${isAgentBubble && !isExpanded ? 'max-h-[140px]' : ''}`}>
                                 {elements}
                                 {isAgentBubble && !isExpanded && !containsCodeBlock && (
                                   <div className="absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-[#1a1a1e] to-transparent pointer-events-none" style={{ mixBlendMode: 'multiply' }}></div>
@@ -1453,6 +1577,8 @@ export default function Home() {
                 type={isLoading ? "button" : "submit"}
                 onClick={isLoading ? stopCurrentResponse : undefined}
                 disabled={!isLoading && (!localInput.trim() || (currentSession.mode === "workspace" && isPreExecutionStage(stage)))}
+                aria-label={isLoading ? "停止回覆" : "送出訊息"}
+                title={isLoading ? "停止回覆" : "送出訊息"}
                 className={`absolute right-4 bottom-4 p-3 rounded-[20px] transition-all duration-300 ${isLoading
                   ? "bg-red-500 text-white shadow-[0_0_25px_rgba(255,77,77,0.55)] hover:scale-110"
                   : localInput.trim()
@@ -1612,18 +1738,21 @@ export default function Home() {
                 onClick={() => {
                   if (executionIssues.length > 0) return;
                   const executionModel = getWorkspaceExecutionModel(agentConfigs, currentSession.model || apiKey || "ollama/qwen2.5");
-                  const finalAgentConfigs = agentConfigs.map((agent) => ({
-                    ...agent,
-                    model: executionModel,
-                    apiKey: isLocalModel(executionModel) ? "" : (agent.apiKey || apiKey),
-                  }));
+                  const finalAgentConfigs = agentConfigs.map((agent) => {
+                    const agentModel = agent.model || executionModel;
+                    return {
+                      ...agent,
+                      model: agentModel,
+                      apiKey: isLocalModel(agentModel) ? "" : (agent.apiKey || apiKey),
+                    };
+                  });
                   setFocusSidebar(false);
                   setIsPanelOpen(false);
                   setStage('execution');
                   setAgentConfigs(finalAgentConfigs);
                   setImplementationReviewPending(false);
                   updateSession(currentSessionId, { stage: 'execution', guideline: guidelineContent, agentConfigs: finalAgentConfigs, implementationReviewPending: false });
-                  submitChat(undefined, '[SYSTEM] The user has approved the implementation guideline and agent team. Begin multi-agent execution now and follow the prompts strictly.', finalAgentConfigs, 'execution');
+                  submitChat(undefined, '[SYSTEM] The user has approved the implementation guideline and agent team. Begin multi-agent execution now and follow the prompts strictly. Work only inside the isolated agent workspace folder, not in the currently running app repo. Treat that isolated workspace as the project root for this generated deliverable. If a role is asked to create multiple files in one work package, complete all of them in the same round instead of one file per round.', finalAgentConfigs, 'execution');
                 }}
                 disabled={executionIssues.length > 0}
                 className="w-full py-4 bg-emerald-500 hover:bg-emerald-400 disabled:bg-white/10 disabled:text-white/35 disabled:cursor-not-allowed text-white font-extrabold text-[15px] rounded-2xl transition-all shadow-[0_0_30px_rgba(16,185,129,0.5)] hover:shadow-[0_0_40px_rgba(16,185,129,0.7)] uppercase tracking-widest flex items-center justify-center gap-2"

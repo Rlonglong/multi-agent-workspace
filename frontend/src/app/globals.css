@@ -1,12 +1,6 @@
-@import "tailwindcss";
-
-@custom-variant dark (&:is(.dark *));
-
-@theme {
-  --color-border: var(--border);
-  --color-foreground: var(--foreground);
-  --color-background: var(--background);
-}
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
 
 :root {
   --background: #050505;
