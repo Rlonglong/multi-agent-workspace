@@ -10,12 +10,13 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 
-export type AgentRole = "PM" | "Frontend" | "Backend" | "QA" | "Marketing";
+export type AgentRole = string;
 
 export interface AgentConfig {
   role: AgentRole;
   model: string;
   prompt?: string;
+  apiKey?: string;
 }
 
 const DEFAULT_MODELS = [

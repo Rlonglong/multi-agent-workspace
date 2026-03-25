@@ -140,3 +140,153 @@ textarea:focus {
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
 }
+
+/* =========================================
+   MARKDOWN RENDERER OVERRIDES
+   ========================================= */
+.markdown-transparent-bg .wmde-markdown {
+  background-color: transparent !important;
+  color: inherit !important;
+  font-family: inherit !important;
+  font-size: inherit !important;
+  line-height: 1.65;
+}
+.markdown-transparent-bg .wmde-markdown p, 
+.markdown-transparent-bg .wmde-markdown h1, 
+.markdown-transparent-bg .wmde-markdown h2, 
+.markdown-transparent-bg .wmde-markdown h3, 
+.markdown-transparent-bg .wmde-markdown h4, 
+.markdown-transparent-bg .wmde-markdown h5, 
+.markdown-transparent-bg .wmde-markdown h6 {
+  color: inherit !important;
+  margin-top: 0.5em !important;
+  margin-bottom: 0.2em !important;
+}
+.markdown-transparent-bg .wmde-markdown p {
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+.markdown-transparent-bg .wmde-markdown p:empty {
+  display: none !important;
+}
+.markdown-transparent-bg .wmde-markdown ul,
+.markdown-transparent-bg .wmde-markdown ol {
+  padding-left: 1.25rem;
+  margin-top: 0.1em !important;
+  margin-bottom: 0.2em !important;
+}
+.markdown-transparent-bg .wmde-markdown li {
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+.markdown-transparent-bg .wmde-markdown li p {
+  margin-top: 0 !important;
+  margin-bottom: 0 !important;
+}
+
+/* =========================================
+   THINKING STATE ANIMATIONS
+   ========================================= */
+@keyframes borderFlow {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+
+.thinking-border-active {
+  position: relative;
+  z-index: 10;
+  background: rgba(10, 0, 5, 0.4) !important;
+  border: none !important;
+  box-shadow: 0 0 15px rgba(255, 0, 0, 0.1) inset;
+}
+
+.thinking-border-active::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px; /* Border thickness */
+  background: linear-gradient(90deg, #110000, #cc0000, #3a0000, #ff1a1a, #110000);
+  background-size: 300% 300%;
+  animation: borderFlow 2.5s ease infinite;
+  
+  /* Hollow out the center */
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  
+  z-index: -1;
+  pointer-events: none;
+}
+
+@keyframes thinkDotsWidth {
+  0% { width: 0; }
+  25% { width: 1ch; }
+  50% { width: 2ch; }
+  75% { width: 3ch; }
+  100% { width: 0; }
+}
+
+.think-anim::after {
+  content: "...";
+  display: inline-block;
+  overflow: hidden;
+  white-space: nowrap;
+  letter-spacing: 2px;
+  vertical-align: bottom;
+  animation: thinkDotsWidth 1.5s steps(1, end) infinite;
+  text-align: left;
+}
+
+/* =========================================
+   PHASE 1: GUIDELINE MODAL
+   ========================================= */
+@keyframes modalIn {
+  from { opacity: 0; transform: scale(0.92) translateY(20px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+@keyframes modalOut {
+  from { opacity: 1; transform: scale(1) translateY(0); }
+  to { opacity: 0; transform: scale(0.92) translateY(20px); }
+}
+.modal-enter { animation: modalIn 0.5s cubic-bezier(0.22,1,0.36,1) forwards; }
+.modal-exit { animation: modalOut 0.35s ease-in forwards; }
+
+.focus-lock-backdrop {
+  transition: filter 0.5s ease, opacity 0.5s ease;
+}
+.focus-lock-active {
+  filter: brightness(0.3) blur(8px);
+  pointer-events: none;
+}
+.focus-sidebar-active {
+  filter: brightness(0.5) blur(4px);
+  pointer-events: none;
+}
+
+/* =========================================
+   PHASE 3: AGENT MESSAGE COLORS
+   ========================================= */
+.agent-bubble-PM { border-left: 3px solid rgba(99,102,241,0.6); }
+.agent-bubble-Frontend { border-left: 3px solid rgba(6,182,212,0.6); }
+.agent-bubble-Backend { border-left: 3px solid rgba(16,185,129,0.6); }
+.agent-bubble-QA { border-left: 3px solid rgba(245,158,11,0.6); }
+.agent-bubble-Marketing { border-left: 3px solid rgba(236,72,153,0.6); }
+.agent-bubble-Design { border-left: 3px solid rgba(168,85,247,0.6); }
+.agent-bubble-DevOps { border-left: 3px solid rgba(239,68,68,0.6); }
+
+/* message fade for collapsed view */
+.msg-fade-mask {
+  -webkit-mask-image: linear-gradient(to bottom, black 40%, transparent 100%);
+  mask-image: linear-gradient(to bottom, black 40%, transparent 100%);
+  max-height: 5em;
+  overflow: hidden;
+  transition: max-height 0.3s ease;
+}
+.msg-fade-mask.expanded {
+  -webkit-mask-image: none;
+  mask-image: none;
+  max-height: none;
+}

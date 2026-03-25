@@ -2,7 +2,9 @@ import * as React from "react"
 
 import { cn } from "@/lib/utils"
 
-function Textarea({ className, ...props }: React.ComponentProps<"textarea">) {
+type TextareaProps = Omit<React.ComponentProps<"textarea">, "children">
+
+function Textarea({ className, ...props }: TextareaProps) {
   return (
     <textarea
       data-slot="textarea"
