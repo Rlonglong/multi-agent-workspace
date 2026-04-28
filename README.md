@@ -2,8 +2,6 @@
 
 A web-based AI chat platform that combines a normal chat experience with a PM-led multi-agent workspace for planning, execution, and review.
 
-Repository: [https://github.com/Rlonglong/multi-agent-workspace](https://github.com/Rlonglong/multi-agent-workspace)
-
 ## Overview
 
 This project started from a standard AI chat web app and was upgraded into **v2.0** with:
