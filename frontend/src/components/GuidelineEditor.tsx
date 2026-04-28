@@ -1,15 +1,7 @@
 "use client";
 
-import dynamic from "next/dynamic";
 import { useState } from "react";
 import { Bot, Play } from "lucide-react";
-import "@uiw/react-md-editor/markdown-editor.css";
-import "@uiw/react-markdown-preview/markdown.css";
-
-const MDEditor = dynamic(
-  () => import("@uiw/react-md-editor").then((mod) => mod.default),
-  { ssr: false }
-);
 
 interface GuidelineEditorProps {
   initialContent: string;
@@ -25,23 +17,29 @@ export function GuidelineEditor({ initialContent, onStartWorkflow }: GuidelineEd
         <Bot className="w-5 h-5 text-[#0a84ff] mr-3" />
         <div>
           <h2 className="text-sm font-semibold text-white/90">Guideline Editor</h2>
-          <p className="text-[11px] text-white/50 tracking-wide">Markdown supported. Modify specs before execution.</p>
+          <p className="text-[11px] text-white/50 tracking-wide">Plain text / Markdown draft. Modify specs before execution.</p>
         </div>
       </div>
-      
-      <div className="flex-1 w-full relative" data-color-mode="dark">
-        <MDEditor
-          value={content}
-          onChange={(val) => setContent(val || "")}
-          height="100%"
-          className="w-full h-full border-none rounded-none !bg-transparent text-[14px]"
-          preview="live"
-        />
-        <style>{`
-          .wmde-markdown { background-color: transparent !important; color: #f5f5f7 !important; }
-          .w-md-editor-toolbar { background-color: rgba(255,255,255,0.05) !important; border-bottom: 1px solid rgba(255,255,255,0.1) !important; }
-          .w-md-editor-content { background-color: transparent !important; }
-        `}</style>
+
+      <div className="grid flex-1 min-h-0 grid-cols-1 lg:grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)]">
+        <div className="min-h-0 border-b border-white/10 lg:border-b-0 lg:border-r lg:border-white/10">
+          <textarea
+            value={content}
+            onChange={(e) => setContent(e.target.value)}
+            className="h-full min-h-[360px] w-full resize-none bg-transparent px-5 py-4 text-[14px] leading-7 text-white/90 outline-none placeholder:text-white/25"
+            placeholder="在這裡調整 implementation guideline..."
+          />
+        </div>
+        <div className="min-h-0 bg-black/15">
+          <div className="border-b border-white/10 px-5 py-3 text-[11px] uppercase tracking-[0.22em] text-white/35">
+            Preview
+          </div>
+          <div className="h-full overflow-y-auto px-5 py-4">
+            <pre className="whitespace-pre-wrap break-words text-[13px] leading-7 text-white/75">
+              {content || "尚未輸入內容"}
+            </pre>
+          </div>
+        </div>
       </div>
 
       <div className="p-4 border-t border-white/10 bg-black/30 flex justify-end">

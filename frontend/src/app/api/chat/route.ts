@@ -4,10 +4,109 @@ import { createGoogleGenerativeAI } from '@ai-sdk/google';
 
 export const maxDuration = 300;
 
+function dataUrlToImageBlock(dataUrl: string) {
+  const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
+  if (!match) return null;
+  const mimeType = match[1];
+  const base64Data = match[2];
+  const imageBytes = Uint8Array.from(Buffer.from(base64Data, 'base64'));
+  return { type: "image" as const, image: imageBytes, mimeType };
+}
+
+function sanitizeMessages(messages: any[]) {
+  return (messages || []).map((message) => {
+    if (!Array.isArray(message?.content)) {
+      return message;
+    }
+
+    const nextContent = message.content.flatMap((part: any) => {
+      if (!part || typeof part !== "object") {
+        return [];
+      }
+
+      if (part.type === "text" && typeof part.text === "string") {
+        return [{ type: "text", text: part.text }];
+      }
+
+      if (typeof part.image === "string" && part.image.startsWith("data:")) {
+        const imageBlock = dataUrlToImageBlock(part.image);
+        return imageBlock ? [imageBlock] : [];
+      }
+
+      if (part.type === "image_url" && typeof part.image_url?.url === "string" && part.image_url.url.startsWith("data:")) {
+        const imageBlock = dataUrlToImageBlock(part.image_url.url);
+        return imageBlock ? [imageBlock] : [];
+      }
+
+      if (typeof part.text === "string") {
+        return [{ type: "text", text: part.text }];
+      }
+
+      return [];
+    });
+
+    return { ...message, content: nextContent };
+  });
+}
+
+function buildProviderGuidance(errorMessage: string, model: string) {
+  const lowered = (errorMessage || "").toLowerCase();
+  const isGemini = (model || "").startsWith("gemini");
+  const isRetryableProviderIssue = [
+    "503",
+    "unavailable",
+    "high demand",
+    "resource_exhausted",
+    "rate limit",
+    "temporarily unavailable",
+  ].some((marker) => lowered.includes(marker));
+
+  if (isGemini && isRetryableProviderIssue) {
+    return [
+      `⚠️ [API Error]: ${errorMessage}`,
+      "",
+      "Gemini 目前看起來是暫時高負載或限流，不一定是你的 API key 有問題。",
+      "建議你現在可以先改用：",
+      "- `gemini-2.0-flash-001`",
+      "- `ollama/qwen2.5`",
+      "- `ollama/deepseek-r1:32b`",
+      "",
+      "如果你願意，也可以暫時切到 local 模型再試一次。",
+    ].join("\n");
+  }
+
+  return `⚠️ [API Error]: ${errorMessage}\n\nIf using Gemini, please check your API key.`;
+}
+
 export async function POST(req: Request) {
   try {
-    const { messages, model, mode, apiKey, task, payload } = await req.json();
+    const { messages, model, mode, apiKey, task, payload, images } = await req.json();
+    const safeMessages = sanitizeMessages(messages || []);
     console.log("1. [Backend] Received Request - Model:", model, "Mode:", mode);
+
+    // 1.5. Inject Multimodal Images into the last user message
+    // Vercel AI SDK requires Uint8Array/Buffer - it does NOT accept data: URLs
+    const isOllamaCheck = (model ?? "").startsWith("ollama/");
+    if (!isOllamaCheck && images && images.length > 0 && safeMessages.length > 0) {
+      const lastMsg = safeMessages[safeMessages.length - 1];
+      if (lastMsg.role === "user") {
+        const textContent = typeof lastMsg.content === 'string' ? lastMsg.content : JSON.stringify(lastMsg.content);
+        const imageBlocks: { type: string; image: Uint8Array; mimeType: string }[] = [];
+        for (const img of images) {
+          try {
+            const imageBlock = dataUrlToImageBlock(img.data);
+            if (imageBlock) {
+              imageBlocks.push(imageBlock);
+            }
+          } catch (e) {
+            console.error("Failed to convert image to buffer:", e);
+          }
+        }
+        if (imageBlocks.length > 0) {
+          lastMsg.content = [{ type: "text", text: textContent }, ...imageBlocks];
+        }
+      }
+    }
 
     const isOllama = (model ?? "").startsWith("ollama/");
     const isGemini = (model ?? "").startsWith("gemini");
@@ -58,7 +157,7 @@ export async function POST(req: Request) {
         "You create concise system prompts for specialized AI agents. Reply only with the final system prompt in Traditional Chinese. The prompt should define role, responsibilities, allowed and forbidden actions, guideline compliance, response style, and escalation rules. For QA/reviewer roles, require item-by-item checking and explicit defect reporting.";
       const taskMessages = [
         {
-          role: "user",
+          role: "user" as const,
           content:
             `角色名稱：${role}\n\n` +
             `現有草稿：\n${draftPrompt || "（目前沒有草稿）"}\n\n` +
@@ -100,7 +199,7 @@ export async function POST(req: Request) {
         "You revise implementation guidelines. Reply in Traditional Chinese only. Return only the updated guideline in clean Markdown. Preserve structure, improve clarity, and avoid excessive blank lines.";
       const taskMessages = [
         {
-          role: "user",
+          role: "user" as const,
           content:
             `目前 guideline：\n${guideline || "（空）"}\n\n` +
             `修改要求：\n${instruction || "請整理內容"}`,
@@ -140,7 +239,7 @@ export async function POST(req: Request) {
     const result = await streamText({
       model: modelProvider,
       system: systemPrompt,
-      messages,
+      messages: safeMessages,
       temperature: 0.7,
     });
 
@@ -158,9 +257,7 @@ export async function POST(req: Request) {
         } catch (streamErr: unknown) {
           const errorMessage = streamErr instanceof Error ? streamErr.message : 'Unknown error';
           console.error("❌ [Backend] Async Stream Error:", streamErr);
-          controller.enqueue(encoder.encode(
-            `\n⚠️ [API Error]: ${errorMessage}\n\nIf using Gemini, please check your API key.`
-          ));
+          controller.enqueue(encoder.encode(`\n${buildProviderGuidance(errorMessage, model || "")}`));
         } finally {
           controller.close();
         }

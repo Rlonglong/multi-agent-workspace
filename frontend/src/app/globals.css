@@ -145,38 +145,71 @@ textarea:focus {
   font-size: inherit !important;
   line-height: 1.65;
 }
-.markdown-transparent-bg .wmde-markdown p, 
-.markdown-transparent-bg .wmde-markdown h1, 
-.markdown-transparent-bg .wmde-markdown h2, 
-.markdown-transparent-bg .wmde-markdown h3, 
-.markdown-transparent-bg .wmde-markdown h4, 
-.markdown-transparent-bg .wmde-markdown h5, 
+
+/* All block-level elements: strip default margins */
+.markdown-transparent-bg .wmde-markdown p,
+.markdown-transparent-bg .wmde-markdown h1,
+.markdown-transparent-bg .wmde-markdown h2,
+.markdown-transparent-bg .wmde-markdown h3,
+.markdown-transparent-bg .wmde-markdown h4,
+.markdown-transparent-bg .wmde-markdown h5,
 .markdown-transparent-bg .wmde-markdown h6 {
   color: inherit !important;
-  margin-top: 0.5em !important;
-  margin-bottom: 0.2em !important;
-}
-.markdown-transparent-bg .wmde-markdown p {
-  margin-top: 0 !important;
+  margin-top: 0.6em !important;
   margin-bottom: 0 !important;
 }
-.markdown-transparent-bg .wmde-markdown p:empty {
+/* First element: no top margin */
+.markdown-transparent-bg .wmde-markdown > *:first-child {
+  margin-top: 0 !important;
+}
+/* Paragraphs: minimal spacing */
+.markdown-transparent-bg .wmde-markdown p {
+  margin-top: 0.3em !important;
+  margin-bottom: 0 !important;
+  line-height: 1.65 !important;
+}
+/* Empty <p> tags that MarkdownPreview emits for blank lines → hide */
+.markdown-transparent-bg .wmde-markdown p:empty,
+.markdown-transparent-bg .wmde-markdown p:blank,
+.markdown-transparent-bg .wmde-markdown br + br {
   display: none !important;
 }
+/* Lists: no extra spacing */
 .markdown-transparent-bg .wmde-markdown ul,
 .markdown-transparent-bg .wmde-markdown ol {
-  padding-left: 1.25rem;
-  margin-top: 0.1em !important;
-  margin-bottom: 0.2em !important;
-}
-.markdown-transparent-bg .wmde-markdown li {
-  margin-top: 0 !important;
+  padding-left: 1.3rem;
+  margin-top: 0.3em !important;
   margin-bottom: 0 !important;
 }
+/* List items: tight */
+.markdown-transparent-bg .wmde-markdown li {
+  margin-top: 0.1em !important;
+  margin-bottom: 0 !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+}
+/* Paragraphs inside list items (loose lists) → collapse */
 .markdown-transparent-bg .wmde-markdown li p {
   margin-top: 0 !important;
   margin-bottom: 0 !important;
 }
+/* Blockquotes */
+.markdown-transparent-bg .wmde-markdown blockquote {
+  margin-top: 0.4em !important;
+  margin-bottom: 0 !important;
+}
+/* Code blocks */
+.markdown-transparent-bg .wmde-markdown pre,
+.markdown-transparent-bg .wmde-markdown code {
+  margin-top: 0.4em !important;
+  margin-bottom: 0 !important;
+}
+/* Tables */
+.markdown-transparent-bg .wmde-markdown table {
+  margin-top: 0.5em !important;
+  margin-bottom: 0 !important;
+}
+
 
 /* =========================================
    THINKING STATE ANIMATIONS

@@ -1,9 +1,8 @@
 "use client";
 
-import { useState, useEffect, useRef, type HTMLAttributes } from "react";
-import { AgentConfig } from "@/components/ModelSelector";
-import MarkdownPreview from '@uiw/react-markdown-preview';
-import { Send, MessageSquare, LayoutPanelLeft, Sparkles, ChevronDown, Clock, KeyRound, Bot, Rocket, Info, X, PanelLeftClose, PanelLeftOpen, RefreshCw, Edit2, Trash2, Plus, Play, Wand2, Square } from "lucide-react";
+import { useState, useEffect, useRef } from "react";
+import type { AgentConfig } from "@/components/ModelSelector";
+import { Send, MessageSquare, LayoutPanelLeft, Sparkles, ChevronDown, Clock, KeyRound, Bot, Rocket, Info, X, PanelLeftClose, PanelLeftOpen, RefreshCw, Edit2, Trash2, Plus, Play, Wand2, Square, Paperclip, Loader2, FileText } from "lucide-react";
 
 // Agent color palette: preset for common roles, random HSL for extras
 const PRESET_COLORS: Record<string, { bg: string; border: string; text: string }> = {
@@ -34,11 +33,45 @@ function normalizeDisplayText(text: string) {
       if (part.startsWith("```")) return part;
       return part
         .replace(/^\s*---+\s*$/gm, "")
+        // Remove standalone markdown footnote/reference lines like "[1]" or "[^1]:" alone on a line
+        .replace(/^\s*\[\^?\d+\]:?\s*$/gm, "")
         .replace(/\n[ \t]*\n[ \t]*\n+/g, "\n\n")
         .replace(/[ \t]+\n/g, "\n")
-        .replace(/\n{4,}/g, "\n\n");
+        .replace(/\n{3,}/g, "\n\n")
+        // Collapse cases where a line is just whitespace between real content
+        .replace(/^[ \t]+$/gm, "");
     })
     .join("");
+}
+
+function renderSimpleContent(text: string) {
+  const normalized = normalizeDisplayText(text);
+  const segments = normalized.split(/(```[\s\S]*?```)/g).filter(Boolean);
+
+  return segments.map((segment, index) => {
+    if (segment.startsWith("```")) {
+      const cleaned = segment.replace(/^```[^\n]*\n?/, "").replace(/\n?```$/, "");
+      return (
+        <details key={`code-${index}`} className="my-3 overflow-hidden rounded-xl border border-white/20 bg-black/60 shadow-xl" open>
+          <summary className="cursor-pointer select-none bg-white/10 p-2.5 font-mono text-[13px] tracking-wide text-white/80 hover:bg-white/20">
+            Source Code Snippet
+          </summary>
+          <pre className="m-0 overflow-x-auto bg-transparent p-4 text-[14px] leading-6 text-white/90 whitespace-pre-wrap">
+            {cleaned}
+          </pre>
+        </details>
+      );
+    }
+
+    return (
+      <div
+        key={`text-${index}`}
+        className="whitespace-pre-wrap break-words text-[15.5px] font-medium leading-[1.65] text-inherit"
+      >
+        {segment}
+      </div>
+    );
+  });
 }
 
 function isLocalModel(model?: string) {
@@ -113,11 +146,35 @@ function getWorkspaceExecutionIssues(agents: AgentConfig[], fallbackKey: string,
   return issues;
 }
 
+function buildModelRecoveryHint(model: string, detail: string) {
+  const loweredModel = (model || "").toLowerCase();
+  const loweredDetail = (detail || "").toLowerCase();
+  const isGemini = loweredModel.startsWith("gemini");
+  const providerBusy = ["503", "unavailable", "high demand", "resource_exhausted", "rate limit"].some((token) => loweredDetail.includes(token));
+
+  if (isGemini && providerBusy) {
+    return [
+      "Gemini 目前看起來是暫時高負載或限流，不一定是 API key 錯誤。",
+      "",
+      "你可以先暫時改用：",
+      "- `gemini-2.0-flash-001`",
+      "- `ollama/qwen2.5`",
+      "- `ollama/deepseek-r1:32b`",
+      "",
+      "等一下再切回 `gemini-2.5-flash` 試試看。"
+    ].join("\n");
+  }
+
+  return "";
+}
+
 export interface ChatMessage {
   id: string;
   role: "system" | "user" | "assistant" | "data";
   content: string;
   name?: string;
+  attachedImages?: {name: string, data: string}[];
+  attachedPdfs?: {name: string}[];
 }
 
 const generateId = () => Date.now().toString() + "-" + Math.random().toString(36).substring(2, 9);
@@ -176,6 +233,25 @@ function ensureWorkspacePmAgent(configs: AgentConfig[] | undefined, model: strin
     apiKey: pm.apiKey || key || "",
   };
   return list;
+}
+
+function syncWorkspaceAgentApiKeys(configs: AgentConfig[] | undefined, newKey: string, previousKey: string): AgentConfig[] {
+  const normalizedNewKey = (newKey || "").trim();
+  const normalizedPreviousKey = (previousKey || "").trim();
+  return (configs || []).map((agent) => {
+    const model = (agent.model || "").trim();
+    if (isLocalModel(model)) {
+      return { ...agent, apiKey: "" };
+    }
+    const currentKey = (agent.apiKey || "").trim();
+    const shouldFollowTopLevelKey =
+      !currentKey ||
+      (normalizedPreviousKey ? currentKey === normalizedPreviousKey : true);
+    if (!shouldFollowTopLevelKey) {
+      return agent;
+    }
+    return { ...agent, apiKey: normalizedNewKey };
+  });
 }
 
 export default function Home() {
@@ -329,14 +405,17 @@ export default function Home() {
   };
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
+  const isExecutionRunning = !!currentSession?.execution_started;
   const executionQueue = currentSession?.execution_queue || [];
   const executionCursor = currentSession?.execution_cursor || 0;
-  const activeExecutionIndex = executionQueue.length > 0
+  const activeExecutionIndex = isExecutionRunning && executionQueue.length > 0
     ? Math.min(Math.max(executionCursor - 1, 0), executionQueue.length - 1)
     : -1;
   const activeExecutionRole = activeExecutionIndex >= 0 ? executionQueue[activeExecutionIndex] : "";
   const completedExecutionCount = executionQueue.length > 0
-    ? Math.min(Math.max(executionCursor - 1, 0), executionQueue.length)
+    ? (isExecutionRunning
+      ? Math.min(Math.max(executionCursor - 1, 0), executionQueue.length)
+      : executionQueue.length)
     : 0;
 
   // Intentional: this syncs session-local UI state only when the active session changes.
@@ -372,7 +451,7 @@ export default function Home() {
       const pmModelForWorkspace = currentSession.mode === "workspace"
         ? (effectiveConfigs.find((agent) => agent.role === "PM")?.model || currentSession.model)
         : currentSession.model;
-      const isM = ["gpt-4o", "claude-3-5-sonnet-20240620", "gemini-2.5-flash", "gemini-2.5-pro", "ollama/deepseek-r1:32b", "ollama/llama3.2", "ollama/qwen2.5"].includes(pmModelForWorkspace || "gpt-4o");
+      const isM = ["gpt-4o", "gpt-4o-mini", "claude-3-5-sonnet-20240620", "gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash-001", "groq/llama-3.3-70b-versatile", "groq/llama-3.1-8b-instant", "openrouter/deepseek/deepseek-r1:free", "openrouter/meta-llama/llama-3.3-70b-instruct:free", "ollama/deepseek-r1:32b", "ollama/llama3.2", "ollama/qwen2.5"].includes(pmModelForWorkspace || "gpt-4o");
       setIsCustomModel(!isM);
       if (!isM) setCustomModelId(pmModelForWorkspace || "");
     }
@@ -531,10 +610,72 @@ export default function Home() {
     }
   };
 
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadController, setUploadController] = useState<AbortController | null>(null);
+  const [attachedFiles, setAttachedFiles] = useState<{name: string, type: 'pdf' | 'image', data: string}[]>([]);
+
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setIsUploading(true);
+    const controller = new AbortController();
+    setUploadController(controller);
+    const formData = new FormData();
+    formData.append("file", file);
+    try {
+      const res = await fetch("http://localhost:8000/api/upload", {
+        method: "POST",
+        body: formData,
+        signal: controller.signal
+      });
+      const data = await res.json();
+      if (data.error) {
+        alert(data.error);
+      } else if (data.type === "pdf") {
+        setAttachedFiles(prev => [...prev, { name: file.name, type: "pdf", data: data.text }]);
+      } else if (data.type === "image") {
+        setAttachedFiles(prev => [...prev, { name: file.name, type: "image", data: data.data }]);
+      }
+    } catch (err: any) {
+      if (err.name === "AbortError") {
+        console.log("Upload cancelled");
+      } else {
+        alert("Upload failed: " + err);
+      }
+    } finally {
+      setIsUploading(false);
+      setUploadController(null);
+      e.target.value = "";
+    }
+  };
+
+  const handleCancelUpload = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (uploadController) {
+      uploadController.abort();
+    }
+  };
+
   const submitChat = async (e?: React.FormEvent, overrideInput?: string, overrideAgentConfigs?: AgentConfig[], overrideStage?: string) => {
     e?.preventDefault();
-    const inputText = overrideInput !== undefined ? overrideInput : localInput;
-    if (!inputText.trim() || isLoading || !currentSessionId || !currentSession) return;
+    let inputText = overrideInput !== undefined ? overrideInput : localInput;
+    if (!inputText.trim() && attachedFiles.length === 0 && !isLoading && !(!currentSessionId || !currentSession)) return;
+
+    const imagesToUpload: {name: string, data: string}[] = [];
+    const pdfsAttached: {name: string}[] = [];
+
+    if (attachedFiles.length > 0 && overrideInput === undefined) {
+      attachedFiles.forEach(f => {
+        if (f.type === 'pdf') {
+          // Append PDF text to inputText for the AI but track display separately
+          inputText += `\n\n[PDF: ${f.name}]\n${f.data}`;
+          pdfsAttached.push({ name: f.name });
+        } else if (f.type === 'image') {
+          inputText += `\n\n[Attached Image: ${f.name}]`;
+          imagesToUpload.push({ name: f.name, data: f.data });
+        }
+      });
+    }
 
     const isSystemCommand = inputText.startsWith("[SYSTEM]");
     const sessionStage = overrideStage || stage || currentSession.stage || "discovery";
@@ -584,11 +725,27 @@ export default function Home() {
     if (sealedState.changed) {
       updateSession(currentSessionId, { messages: baseMessages });
     }
-    const userMsg: ChatMessage = { id: generateId(), role: "user", content: inputText };
+    const userMsg: ChatMessage = {
+      id: generateId(),
+      role: "user",
+      content: inputText,
+      attachedImages: imagesToUpload.length > 0 ? imagesToUpload : undefined,
+      attachedPdfs: pdfsAttached.length > 0 ? pdfsAttached : undefined,
+    };
     let newMessages = [...baseMessages, userMsg];
 
+    // Send only the text + tag to localStorage/WebSocket messages (not the raw base64)
+    const messagesForWs = newMessages.map(msg => {
+      // Strip raw base64 from content if it somehow slipped in, keep only tags
+      const clean = { ...msg };
+      delete (clean as any).attachedImages;
+      return clean;
+    });
     updateSession(currentSessionId, { messages: newMessages });
-    setLocalInput("");
+    if (overrideInput === undefined) {
+      setLocalInput("");
+      setAttachedFiles([]);
+    }
     setIsLoading(true);
     hasAssistantSpeechStartedRef.current = false;
     const initialThinkingText = "正在分析需求與規劃下一步...";
@@ -620,12 +777,13 @@ export default function Home() {
         ws.onopen = () => {
           ws.send(JSON.stringify({
             session_id: currentSessionId,
-            messages: newMessages,
+            messages: messagesForWs,
             agent_configs: outgoingAgentConfigs,
             mode: "workspace",
             api_key: apiKey,
             stage: sessionStage,
             guideline: sessionGuideline,
+            images: imagesToUpload,
             execution_started: currentSession.execution_started ?? false,
             execution_queue: currentSession.execution_queue ?? [],
             execution_cursor: currentSession.execution_cursor ?? 0
@@ -744,6 +902,17 @@ export default function Home() {
                 scheduleHideWorkspaceThinking();
               }
             } else if (data.type === "finish") {
+              const finishedQueue = data.execution_queue !== undefined
+                ? data.execution_queue
+                : (currentSession.execution_queue || []);
+              const finishedCursor = data.execution_cursor !== undefined
+                ? data.execution_cursor
+                : (finishedQueue.length > 0 ? finishedQueue.length : currentSession.execution_cursor);
+              updateSession(currentSessionId, {
+                execution_started: false,
+                execution_queue: finishedQueue,
+                execution_cursor: finishedCursor,
+              });
               setIsLoading(false);
               if (hasAssistantSpeechStartedRef.current) scheduleHideWorkspaceThinking();
               else setShowWorkspaceThinking(false);
@@ -800,10 +969,11 @@ export default function Home() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          messages: newMessages,
+          messages: messagesForWs,
           mode: "chat",
           model: currentSession?.model,
-          apiKey: apiKey
+          apiKey: apiKey,
+          images: imagesToUpload
         }),
         signal: abortController.signal,
       });
@@ -829,7 +999,8 @@ export default function Home() {
 
       if (assistantText.trim() === "") {
         const isLocal = currentSession?.model?.startsWith("ollama/");
-        assistantText = `⚠️ [API Error]: The model returned an empty response.\n\n${isLocal ? "This is a local model. Please ensure the **Ollama** app is running on your Mac and the model is downloaded." : "This usually occurs because your **API Key is invalid or has insufficient quota**.\n\nPlease check the ℹ️ Info menu in the top right to verify your setup."}`;
+        const recoveryHint = buildModelRecoveryHint(currentSession?.model || "", "empty response");
+        assistantText = `⚠️ [API Error]: The model returned an empty response.\n\n${isLocal ? "This is a local model. Please ensure the **Ollama** app is running on your Mac and the model is downloaded." : (recoveryHint || "This usually occurs because your **API Key is invalid or has insufficient quota**.\n\nPlease check the ℹ️ Info menu in the top right to verify your setup.")}`;
         updateSession(currentSessionId, {
           messages: [...newMessages, { id: assistantId, role: "assistant", content: assistantText }]
         });
@@ -845,8 +1016,9 @@ export default function Home() {
       }
       const detail = err instanceof Error ? err.message : String(err);
       console.error(err);
+      const recoveryHint = buildModelRecoveryHint(currentSession?.model || "", detail);
       updateSession(currentSessionId, {
-        messages: [...newMessages, { id: assistantId, role: "assistant", content: `⚠️ [Network Error]: Could not connect to the chat server.\nDetail: ${detail}` }]
+        messages: [...newMessages, { id: assistantId, role: "assistant", content: `⚠️ [Network Error]: Could not connect to the chat server.\nDetail: ${detail}${recoveryHint ? `\n\n${recoveryHint}` : ""}` }]
       });
     } finally {
       setIsLoading(false);
@@ -875,6 +1047,10 @@ export default function Home() {
 
   useEffect(() => {
     if (!isNearBottomRef.current) return;
+    // Don't auto-scroll while the user has an active text selection—
+    // this prevents the selection highlight from jumping during streaming.
+    const sel = window.getSelection();
+    if (sel && sel.toString().length > 0) return;
     scrollMessagesToBottom(isLoading ? "auto" : "smooth");
   }, [currentSession?.messages.length, showWorkspaceThinking, isLoading, stage]);
 
@@ -930,16 +1106,24 @@ export default function Home() {
             </div>
             <div className="space-y-4 text-[14.5px] text-white/80 leading-relaxed">
               <div className="bg-white/5 hover:bg-white/10 transition-colors p-5 rounded-[24px] border border-white/5">
-                <strong className="text-white flex items-center gap-2 mb-2 text-[15px]"><span className="text-[#32ade6] font-black text-lg">1.</span> Free Gemini Pro (Google AI Studio)</strong>
-                Go to <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2 font-medium">Google AI Studio</a> to get a 100% free Gemini API Key. Click the 🔑 icon in the top right to paste it. Select <code>gemini-2.5-flash</code> from the model selector!
+                <strong className="text-white flex items-center gap-2 mb-2 text-[15px]"><span className="text-[#32ade6] font-black text-lg">1.</span> Free Gemini (Google AI Studio)</strong>
+                前往 <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-indigo-400 hover:text-indigo-300 underline underline-offset-2 font-medium">Google AI Studio</a> → 建立 API Key → 貼到右上角 🔑 → 選 <code>Gemini 2.5 Flash</code>。免費層額度會依模型與專案層級而異，請以官方 Rate Limits 頁面為準。
               </div>
               <div className="bg-white/5 hover:bg-white/10 transition-colors p-5 rounded-[24px] border border-white/5">
-                <strong className="text-white flex items-center gap-2 mb-2 text-[15px]"><span className="text-indigo-400 font-black text-lg">2.</span> OpenAI API Key (GPT-4o)</strong>
-                Paste your paid OpenAI API Key into the 🔑 field. It is securely saved in your browser storage.
+                <strong className="text-white flex items-center gap-2 mb-2 text-[15px]"><span className="text-orange-400 font-black text-lg">2.</span> Free Groq (超快速 LPU)</strong>
+                前往 <a href="https://console.groq.com/keys" target="_blank" className="text-orange-400 hover:text-orange-300 underline underline-offset-2 font-medium">Groq Console</a> → 建立 API Key → 貼到 🔑 → 選 <code>Groq Llama 3.3 70B</code>。免費、速度最快（LPU 推理），每分鐘 30 requests。
               </div>
               <div className="bg-white/5 hover:bg-white/10 transition-colors p-5 rounded-[24px] border border-white/5">
-                <strong className="text-white flex items-center gap-2 mb-2 text-[15px]"><span className="text-purple-400 font-black text-lg">3.</span> Local Ollama Models (No API Key)</strong>
-                Simply select <code>ollama/llama3.2</code> or use <strong>Custom Model...</strong> to type <code>ollama/deepseek-coder</code>. Ensure your local Ollama app is running in the terminal!
+                <strong className="text-white flex items-center gap-2 mb-2 text-[15px]"><span className="text-emerald-400 font-black text-lg">3.</span> Free OpenRouter (免費 DeepSeek R1)</strong>
+                前往 <a href="https://openrouter.ai/keys" target="_blank" className="text-emerald-400 hover:text-emerald-300 underline underline-offset-2 font-medium">OpenRouter</a> → 建立 API Key → 貼到 🔑 → 選 <code>OpenRouter DeepSeek R1 (Free)</code>。免費模型標示 <code>:free</code>，可用 DeepSeek R1 推理能力。
+              </div>
+              <div className="bg-white/5 hover:bg-white/10 transition-colors p-5 rounded-[24px] border border-white/5">
+                <strong className="text-white flex items-center gap-2 mb-2 text-[15px]"><span className="text-indigo-400 font-black text-lg">4.</span> OpenAI (GPT-4o, 付費)</strong>
+                將 OpenAI API Key 貼到 🔑 欄位，選 <code>GPT-4o</code> 或 <code>GPT-4o Mini</code>。
+              </div>
+              <div className="bg-white/5 hover:bg-white/10 transition-colors p-5 rounded-[24px] border border-white/5">
+                <strong className="text-white flex items-center gap-2 mb-2 text-[15px]"><span className="text-purple-400 font-black text-lg">5.</span> Local Ollama (不需 API Key)</strong>
+                確保 Ollama 正在執行（執行 <code>ollama serve</code>），選 <code>Qwen 2.5 (Local)</code> 或 <code>DeepSeek R1 32B (Local)</code>。模型存放在外接硬碟使用 <code>start_ollama_x9.sh</code> 啟動。
               </div>
             </div>
             <button onClick={() => setShowHelp(false)} className="w-full bg-indigo-500 hover:bg-indigo-400 text-white py-3.5 rounded-[20px] transition-all shadow-[0_0_20px_rgba(99,102,241,0.4)] font-bold uppercase tracking-widest text-sm mt-4">Understood</button>
@@ -1101,8 +1285,18 @@ export default function Home() {
                     value={apiKey}
                     placeholder="API Key..."
                     onChange={(e) => {
-                      setApiKey(e.target.value);
-                      updateSession(currentSessionId, { apiKey: e.target.value });
+                      const nextKey = e.target.value;
+                      const previousKey = apiKey;
+                      setApiKey(nextKey);
+                      if (currentSession.mode === "workspace") {
+                        setAgentConfigs((prev) => {
+                          const synced = syncWorkspaceAgentApiKeys(prev, nextKey, previousKey);
+                          updateSession(currentSessionId, { apiKey: nextKey, agentConfigs: synced });
+                          return synced;
+                        });
+                      } else {
+                        updateSession(currentSessionId, { apiKey: nextKey });
+                      }
                     }}
                     className="w-[200px] bg-transparent text-white/85 placeholder-white/35 outline-none border-0 shadow-none"
                   />
@@ -1143,13 +1337,22 @@ export default function Home() {
                   className="bg-transparent outline-none cursor-pointer appearance-none text-white font-semibold min-w-[140px]"
                 >
                   <option value="gpt-4o" className="text-black">GPT-4o</option>
-                  <option value="claude-3-5-sonnet-20240620" className="text-black">Claude 3.5</option>
-                  <option value="gemini-2.5-flash" className="text-black">Gemini 2.5 Flash</option>
+                  <option value="gpt-4o-mini" className="text-black">GPT-4o Mini</option>
+                  <option value="claude-3-5-sonnet-20240620" className="text-black">Claude 3.5 Sonnet</option>
+                  <option disabled className="text-black">── Gemini (Free) ──</option>
+                  <option value="gemini-2.5-flash" className="text-black">Gemini 2.5 Flash ⚡</option>
                   <option value="gemini-2.5-pro" className="text-black">Gemini 2.5 Pro</option>
-                  <option disabled className="text-black">──────────</option>
+                  <option value="gemini-2.0-flash-001" className="text-black">Gemini 2.0 Flash</option>
+                  <option disabled className="text-black">── Groq (Free, Fast) ──</option>
+                  <option value="groq/llama-3.3-70b-versatile" className="text-black">Groq Llama 3.3 70B ⚡</option>
+                  <option value="groq/llama-3.1-8b-instant" className="text-black">Groq Llama 3.1 8B (Fast)</option>
+                  <option disabled className="text-black">── OpenRouter (Free) ──</option>
+                  <option value="openrouter/deepseek/deepseek-r1:free" className="text-black">OpenRouter DeepSeek R1</option>
+                  <option value="openrouter/meta-llama/llama-3.3-70b-instruct:free" className="text-black">OpenRouter Llama 3.3 70B</option>
+                  <option disabled className="text-black">── Local (Ollama) ──</option>
                   <option value="ollama/deepseek-r1:32b" className="text-black">DeepSeek R1 32B (Local)</option>
-                  <option value="ollama/llama3.2" className="text-black">Llama 3.2 (Local)</option>
                   <option value="ollama/qwen2.5" className="text-black">Qwen 2.5 (Local)</option>
+                  <option value="ollama/llama3.2" className="text-black">Llama 3.2 (Local)</option>
                   <option value="custom" className="text-black">Custom Model...</option>
                 </select>
                 {!isCustomModel && <ChevronDown className="w-4 h-4 text-white/40 shrink-0 pointer-events-none" />}
@@ -1207,9 +1410,9 @@ export default function Home() {
                         onClick={() => setExecutionBannerCollapsed(false)}
                         className="flex items-center gap-2 rounded-full border border-white/10 bg-black/45 px-3 py-2 backdrop-blur-xl shadow-[0_8px_24px_rgba(0,0,0,0.25)] text-left"
                       >
-                        <div className={`h-2 w-2 rounded-full ${isLoading ? "bg-emerald-400 animate-pulse shadow-[0_0_12px_rgba(74,222,128,0.8)]" : "bg-white/25"}`} />
+                        <div className={`h-2 w-2 rounded-full ${isExecutionRunning ? "bg-emerald-400 animate-pulse shadow-[0_0_12px_rgba(74,222,128,0.8)]" : "bg-sky-300/80 shadow-[0_0_10px_rgba(125,211,252,0.5)]"}`} />
                         <span className="text-[11px] font-black uppercase tracking-[0.22em] text-white/45">Queue</span>
-                        <span className="text-[12px] text-white/82 font-semibold">{activeExecutionRole || "Waiting"}</span>
+                        <span className="text-[12px] text-white/82 font-semibold">{activeExecutionRole || (executionQueue.length > 0 ? "Completed" : "Waiting")}</span>
                         <span className="text-[11px] text-white/35">◀</span>
                       </button>
                       {isLoading && (
@@ -1228,15 +1431,17 @@ export default function Home() {
                       <div className="flex flex-wrap items-start justify-between gap-3">
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-2">
-                            <div className={`h-2 w-2 rounded-full ${isLoading ? "bg-emerald-400 animate-pulse shadow-[0_0_10px_rgba(74,222,128,0.75)]" : "bg-white/25"}`} />
+                            <div className={`h-2 w-2 rounded-full ${isExecutionRunning ? "bg-emerald-400 animate-pulse shadow-[0_0_10px_rgba(74,222,128,0.75)]" : "bg-sky-300/80 shadow-[0_0_10px_rgba(125,211,252,0.5)]"}`} />
                             <span className="text-[10px] font-black uppercase tracking-[0.24em] text-white/38">Execution Queue</span>
                           </div>
                           <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
                             <span className="text-[14px] font-semibold text-white/88">
-                              {activeExecutionRole ? `目前執行：${activeExecutionRole}` : "等待下一位 agent"}
+                              {activeExecutionRole
+                                ? `目前執行：${activeExecutionRole}`
+                                : (executionQueue.length > 0 ? "本輪 execution 已完成" : "等待下一位 agent")}
                             </span>
                             <span className="rounded-full border border-white/8 bg-white/[0.04] px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-white/48">
-                              {isLoading ? "Running" : "Waiting"}
+                              {isExecutionRunning ? "Running" : (executionQueue.length > 0 ? "Completed" : "Waiting")}
                             </span>
                           </div>
                         </div>
@@ -1266,7 +1471,7 @@ export default function Home() {
                       <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-white/[0.06]">
                         <div
                           className="h-full rounded-full bg-[linear-gradient(90deg,rgba(16,185,129,0.9),rgba(99,102,241,0.9))] transition-all duration-500"
-                          style={{ width: `${Math.max((completedExecutionCount / executionQueue.length) * 100, activeExecutionRole ? 8 : 0)}%` }}
+                          style={{ width: `${Math.max((completedExecutionCount / executionQueue.length) * 100, activeExecutionRole ? 8 : (executionQueue.length > 0 ? 100 : 0))}%` }}
                         />
                       </div>
 
@@ -1376,9 +1581,55 @@ export default function Home() {
                     </div>
                   ) : (
                     <>
+                      {/* Render attached image tags as inline thumbnails */}
+                      {m.role === 'user' && /\[Attached Image: [^\]]+\]/.test(m.content) && (() => {
+                        const imgMatches = [...m.content.matchAll(/\[Attached Image: ([^\]]+)\]/g)];
+                        const storedImages = (m as any).attachedImages as {name: string, data: string}[] | undefined;
+                        return imgMatches.length > 0 ? (
+                          <div className="flex flex-wrap gap-2 mb-2">
+                            {imgMatches.map((match, ii) => {
+                              const name = match[1];
+                              const imgData = storedImages?.find(img => img.name === name)?.data;
+                              return imgData ? (
+                                <details key={ii} className="inline-block">
+                                  <summary className="cursor-pointer list-none flex items-center gap-2 bg-white/20 hover:bg-white/30 transition-colors px-3 py-1.5 rounded-xl text-[13px] font-medium text-white/90 border border-white/20">
+                                    <img src={imgData} alt={name} className="w-6 h-6 object-cover rounded-md" />
+                                    <span className="max-w-[150px] truncate">{name}</span>
+                                    <span className="text-[10px] opacity-60">▼</span>
+                                  </summary>
+                                  <div className="mt-2 p-1 bg-black/40 rounded-xl border border-white/10">
+                                    <img src={imgData} alt={name} className="max-w-[300px] max-h-[200px] object-contain rounded-lg" />
+                                  </div>
+                                </details>
+                              ) : (
+                                <span key={ii} className="inline-flex items-center gap-1.5 bg-white/20 px-3 py-1.5 rounded-xl text-[13px]">
+                                  <FileText className="w-4 h-4" /> {name}
+                                </span>
+                              );
+                            })}
+                          </div>
+                        ) : null;
+                      })()}
+                      {/* Render PDF attachments as file pills */}
+                      {m.role === 'user' && (m as any).attachedPdfs && ((m as any).attachedPdfs as {name: string}[]).length > 0 && (
+                        <div className="flex flex-wrap gap-2 mb-2">
+                          {((m as any).attachedPdfs as {name: string}[]).map((pdf, ii) => (
+                            <span key={ii} className="inline-flex items-center gap-2 bg-blue-500/20 border border-blue-400/30 px-3 py-1.5 rounded-xl text-[13px] font-medium text-blue-200">
+                              <FileText className="w-4 h-4 text-blue-400 shrink-0" />
+                              <span className="max-w-[180px] truncate">{pdf.name}</span>
+                            </span>
+                          ))}
+                        </div>
+                      )}
                       <div className="whitespace-pre-wrap text-[15.5px] font-medium leading-[1.65] drop-shadow-sm">
                         {(() => {
-                          let display = m.content;
+                          // Strip [Attached Image: ...] and [PDF: name]\n<text until next tag or end> from display text in user bubble
+                          let display = m.role === 'user'
+                            ? m.content
+                                .replace(/\n?\n?\[Attached Image: [^\]]+\]/g, '')
+                                .replace(/\n?\n?\[PDF: [^\]]+\]\n[\s\S]*?(?=\n\n\[|$)/g, '')
+                                .trim()
+                            : m.content;
                           const isStreamingThisMessage = isLoading && m.role === 'assistant' && idx === currentSession.messages.length - 1;
                           
                           // Artificially enforce <think> state during early fragmented stream tokens or empty start
@@ -1443,28 +1694,7 @@ export default function Home() {
                                 </div>
                               );
                             }
-                            return (
-                              <div key={i} data-color-mode="dark" className="markdown-transparent-bg">
-                                <MarkdownPreview 
-                                  source={part} 
-                                  style={{ backgroundColor: 'transparent', color: 'inherit', fontSize: '15.5px', fontFamily: 'inherit' }}
-                                  components={{
-                                    pre: ({ children, ...props }: HTMLAttributes<HTMLPreElement>) => {
-                                      return (
-                                        <details className="my-3 border border-white/20 rounded-xl bg-black/60 overflow-hidden shadow-xl" open>
-                                          <summary className="p-2.5 bg-white/10 cursor-pointer hover:bg-white/20 text-[13px] text-white/80 font-mono tracking-wide select-none">
-                                            👨‍💻 Source Code Snippet
-                                          </summary>
-                                          <pre {...props} className="bg-transparent m-0 p-4 overflow-x-auto text-[14px]">
-                                            {children}
-                                          </pre>
-                                        </details>
-                                      );
-                                    }
-                                  }}
-                                />
-                              </div>
-                            );
+                            return <div key={i}>{renderSimpleContent(part)}</div>;
                           }).filter(Boolean);
 
                           return (
@@ -1547,9 +1777,40 @@ export default function Home() {
         {/* Input Area */}
         <div className="w-full shrink-0 bg-transparent pt-2 pb-6 px-6 z-30">
           <div className="max-w-4xl mx-auto relative group flex flex-col gap-2">
-            <form onSubmit={submitChat} className="relative w-full">
+            <form onSubmit={(e) => { e.preventDefault(); if (!isUploading) submitChat(e); }} className="relative w-full">
+              {attachedFiles.length > 0 && (
+                <div className="absolute left-16 bottom-20 z-20 flex flex-wrap gap-2 max-w-[calc(100%-100px)] max-h-[120px] overflow-y-auto p-2 bg-black/40 backdrop-blur-md rounded-2xl border border-white/10">
+                  {attachedFiles.map((f, i) => (
+                    <div key={i} className="relative group flex items-center gap-2 bg-white/10 p-2 rounded-xl pr-8 border border-white/5">
+                      {f.type === 'image' ? (
+                        <img src={f.data} alt={f.name} className="w-10 h-10 object-cover rounded-lg shadow-sm" />
+                      ) : (
+                        <div className="w-10 h-10 flex items-center justify-center bg-blue-500/20 rounded-lg shadow-sm">
+                          <FileText className="w-5 h-5 text-blue-400" />
+                        </div>
+                      )}
+                      <span className="text-xs font-medium text-white/80 max-w-[120px] truncate">{f.name}</span>
+                      <button 
+                        type="button"
+                        onClick={(e) => { e.preventDefault(); setAttachedFiles(prev => prev.filter((_, idx) => idx !== i)); }}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 p-1 rounded-full bg-black/50 text-white/70 hover:text-white hover:bg-red-500/80 transition-colors"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <label 
+                className={`absolute left-4 bottom-4 p-3 rounded-[20px] transition-all cursor-pointer z-10 ${isUploading ? 'text-red-400 hover:bg-white/10' : 'text-white/70 hover:text-white hover:bg-white/10'}`}
+                onClick={isUploading ? handleCancelUpload : undefined}
+                title={isUploading ? "Cancel upload" : "Upload file"}
+              >
+                {isUploading ? <Loader2 className="w-[20px] h-[20px] animate-spin" /> : <Paperclip className="w-[20px] h-[20px]" />}
+                {!isUploading && <input type="file" className="hidden" accept=".pdf,.png,.jpg,.jpeg,.webp" onChange={handleFileUpload} />}
+              </label>
               <textarea
-                className="w-full resize-none bg-white/[0.02] backdrop-blur-[8px] border-[1.5px] border-white/25 hover:border-white/40 rounded-[32px] pl-7 pr-16 py-5 text-[15.5px] placeholder-white/40 scrollbar-hide focus-animated outline-none shadow-[inset_0_0_20px_rgba(255,255,255,0.03),0_20px_50px_rgba(0,0,0,0.6)] font-medium text-white transition-all duration-500 ease-out"
+                className="w-full resize-none bg-white/[0.02] backdrop-blur-[8px] border-[1.5px] border-white/25 hover:border-white/40 rounded-[32px] pl-16 pr-16 py-5 text-[15.5px] placeholder-white/40 scrollbar-hide focus-animated outline-none shadow-[inset_0_0_20px_rgba(255,255,255,0.03),0_20px_50px_rgba(0,0,0,0.6)] font-medium text-white transition-all duration-500 ease-out"
                 placeholder={
                   currentSession.mode === "workspace"
                     ? (stage === "discovery"
@@ -1569,14 +1830,14 @@ export default function Home() {
                   if (e.key === "Enter" && !e.shiftKey) {
                     if (e.nativeEvent.isComposing) return;
                     e.preventDefault();
-                    submitChat();
+                    if (!isUploading) submitChat();
                   }
                 }}
               />
               <button
                 type={isLoading ? "button" : "submit"}
                 onClick={isLoading ? stopCurrentResponse : undefined}
-                disabled={!isLoading && (!localInput.trim() || (currentSession.mode === "workspace" && isPreExecutionStage(stage)))}
+                disabled={isUploading || (!isLoading && (!localInput.trim() && attachedFiles.length === 0 || (currentSession.mode === "workspace" && isPreExecutionStage(stage))))}
                 aria-label={isLoading ? "停止回覆" : "送出訊息"}
                 title={isLoading ? "停止回覆" : "送出訊息"}
                 className={`absolute right-4 bottom-4 p-3 rounded-[20px] transition-all duration-300 ${isLoading
@@ -1670,9 +1931,15 @@ export default function Home() {
                           className="bg-black/50 border border-white/10 text-white text-[11px] px-2 py-1 rounded-lg outline-none max-w-[120px]"
                         >
                           <option value="gpt-4o" className="text-black">GPT-4o</option>
-                          <option value="gemini-2.5-flash" className="text-black">Gemini Flash</option>
-                          <option value="gemini-2.5-pro" className="text-black">Gemini Pro</option>
-                          <option value="ollama/deepseek-r1:32b" className="text-black">DeepSeek (Local)</option>
+                          <option value="gpt-4o-mini" className="text-black">GPT-4o Mini</option>
+                          <option value="gemini-2.5-flash" className="text-black">Gemini 2.5 Flash</option>
+                          <option value="gemini-2.5-pro" className="text-black">Gemini 2.5 Pro</option>
+                          <option value="gemini-2.0-flash-001" className="text-black">Gemini 2.0 Flash</option>
+                          <option value="groq/llama-3.3-70b-versatile" className="text-black">Groq Llama 3.3 70B ⚡</option>
+                          <option value="groq/llama-3.1-8b-instant" className="text-black">Groq Llama 3.1 8B</option>
+                          <option value="openrouter/deepseek/deepseek-r1:free" className="text-black">OR DeepSeek R1 (Free)</option>
+                          <option value="ollama/deepseek-r1:32b" className="text-black">DeepSeek R1 (Local)</option>
+                          <option value="ollama/qwen2.5" className="text-black">Qwen 2.5 (Local)</option>
                           <option value="ollama/llama3.2" className="text-black">Llama 3.2 (Local)</option>
                         </select>
                         <button
@@ -1724,6 +1991,7 @@ export default function Home() {
                         return next;
                       });
                     setPendingAgentRole("");
+                    if (window.getSelection()?.toString()) { window.getSelection()?.removeAllRanges(); }
                   }}
                   className="w-full py-3 text-[13px] font-semibold flex items-center justify-center gap-2 transition-colors hover:bg-white/5 rounded-xl text-white/70"
                 ><Plus className="w-4 h-4" /> Add Agent</button>
@@ -1770,8 +2038,8 @@ export default function Home() {
             <div className="space-y-3">
               <h3 className="text-[12px] font-black text-white/40 uppercase tracking-widest pl-1">Guideline Preview</h3>
               <div className="bg-black/20 border border-white/10 rounded-[20px] p-4 max-h-[300px] overflow-y-auto scrollbar-hide">
-                <div data-color-mode="dark" className="markdown-transparent-bg">
-                  <MarkdownPreview source={guidelineContent} style={{ backgroundColor: 'transparent', color: 'inherit', fontSize: '13px' }} />
+                <div className="whitespace-pre-wrap break-words text-[13px] leading-6 text-white/80">
+                  {normalizeDisplayText(guidelineContent)}
                 </div>
               </div>
             </div>

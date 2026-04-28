@@ -1,47 +1,49 @@
-# Multi-Agent Workspace
+# Multi-Agent Workspace v2.0
 
-A web-based AI chat platform with two core modes:
+A web-based AI chat platform that combines a normal chat experience with a PM-led multi-agent workspace for planning, execution, and review.
 
-- `Chat Mode`: a normal single-assistant chat experience with streaming output.
-- `Workspace Mode`: a PM-led multi-agent workflow for discovery, implementation planning, agent configuration, execution, and review.
+Repository: [https://github.com/Rlonglong/multi-agent-workspace](https://github.com/Rlonglong/multi-agent-workspace)
 
-This project uses a Next.js frontend and a FastAPI backend connected over HTTP and WebSocket streams.
+## Overview
 
-## Highlights
+This project started from a standard AI chat web app and was upgraded into **v2.0** with:
 
-- Normal chat interface with model selection and API key input
-- Workspace flow with `discovery -> implementation -> execution`
-- PM agent that gathers requirements before generating implementation guidelines
-- Editable agent roster with per-agent model and prompt configuration
-- Multi-agent execution queue with visible progress and stop control
-- Separate `agent_workspace/` sandbox so generated deliverables do not modify the main app repo
-- Streaming UI with collapsible thinking blocks and execution status banner
+- `Chat Mode`: single-assistant conversation with streaming output
+- `Workspace Mode`: a PM agent that gathers requirements, generates an implementation guideline, proposes an agent team, and coordinates execution
+- `agent_workspace/`: an isolated sandbox where agents write generated project files without modifying the main system repo
 
-## Preview
+## v2.0 Features
 
-![Workspace UI](./docs/workspace-preview.png)
+- Long-term memory with ChromaDB-backed project recall
+- Multimodal input for PDFs and images
+- Auto routing between cloud and local models
+- Tool use through a unified agent tool layer
+- QA feedback loop for rework and validation
+- Execution queue UI with visible progress and manual stop control
 
-## Tech Stack
+## Core Stack
 
-- Frontend: Next.js 14, React 18, TypeScript, Tailwind CSS
-- Backend: FastAPI, WebSocket streaming, LangGraph-based agent orchestration
-- Local models: Ollama
-- Cloud models: Gemini / OpenAI compatible model routing
+- Frontend: Next.js 14, React 18, TypeScript
+- Backend: FastAPI, WebSocket streaming, LangGraph orchestration
+- Local models: Ollama (`deepseek-r1:32b`, `qwen2.5`, `llama3.2`)
+- Cloud models: Gemini and OpenAI-compatible routing
+- Memory: ChromaDB
 
-## Project Structure
+## Repository Structure
 
 ```text
 multi-agent-workspace/
-├── frontend/                # Next.js app
-├── backend/                 # FastAPI + agent orchestration
-├── agent_workspace/         # Isolated sandbox for generated project output
-├── docs/                    # Project docs
+├── frontend/                 # Next.js frontend
+├── backend/                  # FastAPI backend + agent orchestration
+├── docs/                     # Assignment docs and architecture notes
+├── agent_workspace/          # Sandbox for generated project output
+├── start_ollama_x9.sh        # Local Ollama startup script
 └── README.md
 ```
 
-## Getting Started
+## Run Locally
 
-### 1. Frontend
+### Frontend
 
 ```bash
 cd frontend
@@ -49,35 +51,34 @@ npm install
 npm run dev
 ```
 
-Frontend runs at [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3000](http://localhost:3000).
 
-### 2. Backend
+### Backend
 
 ```bash
 cd backend
-./venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+./venv/bin/python -m uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
-Backend health check:
+Health check:
 
 ```bash
 curl http://127.0.0.1:8000/api/health
 ```
 
-### 3. Local Models with Ollama
+### Ollama
 
-If you want to use local models, start Ollama first and make sure your models are available.
+```bash
+bash start_ollama_x9.sh
+```
+
+The script stores local models under the external-drive path configured in `start_ollama_x9.sh`.
 
 ## Security Notes
 
-- Do not commit real API keys.
-- Keep `.env` and local secret files out of version control.
-- This repo only includes example env files and client-side key entry UI.
-- Generated agent output is intended to stay inside `agent_workspace/`.
-
-## Current Status
-
-This repository is under active development. The workspace flow, queue handling, stop control, and isolated agent sandbox are implemented, but some generated-project paths and older experimental files may still be present locally during development.
+- Do not commit real API keys or `.env` files
+- Use the top input field or per-agent settings to provide runtime keys
+- Generated files should stay inside `agent_workspace/`
 
 ## License
 

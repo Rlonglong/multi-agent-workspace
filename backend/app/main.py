@@ -1,4 +1,4 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from pydantic import BaseModel
@@ -57,6 +57,23 @@ def format_exception_detail(err: Exception) -> str:
     if tb_tail and tb_tail != detail:
         return f"{detail}\n{tb_tail}"
     return detail
+
+
+def build_finished_execution_state(execution_started, execution_queue, execution_cursor):
+    queue = list(execution_queue or [])
+    if not queue:
+        return {
+            "execution_started": False,
+            "execution_queue": [],
+            "execution_cursor": 0,
+        }
+    cursor = execution_cursor if isinstance(execution_cursor, int) else len(queue)
+    cursor = max(cursor, len(queue))
+    return {
+        "execution_started": False,
+        "execution_queue": queue,
+        "execution_cursor": cursor,
+    }
 
 
 def validate_execution_agents(agent_configs, fallback_key: str = ""):
@@ -132,6 +149,29 @@ app.add_middleware(
 async def health_check():
     return {"status": "healthy", "service": "multi-agent-backend"}
 
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...)):
+    if file.filename.lower().endswith(".pdf"):
+        import fitz  # PyMuPDF
+        try:
+            doc = fitz.open(stream=await file.read(), filetype="pdf")
+            text = ""
+            for page in doc:
+                text += page.get_text()
+            return {"type": "pdf", "text": text}
+        except Exception as e:
+            return {"error": f"Failed to parse PDF: {str(e)}"}
+    elif file.filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+        import base64
+        try:
+            file_bytes = await file.read()
+            base64_img = base64.b64encode(file_bytes).decode('utf-8')
+            mime_type = file.content_type
+            return {"type": "image", "data": f"data:{mime_type};base64,{base64_img}"}
+        except Exception as e:
+            return {"error": f"Failed to encode image: {str(e)}"}
+    return {"error": "Unsupported file format"}
+
 
 @app.post("/api/execution/stop")
 async def stop_execution(payload: StopExecutionPayload):
@@ -153,12 +193,38 @@ async def websocket_endpoint(websocket: WebSocket):
             STOP_REQUESTED.discard(session_id)
 
         # 2. Inject API key into environment so LiteLLM can pick it up natively
-        api_key = payload.get("api_key", "")
+        api_key = str(payload.get("api_key", "")).strip()
+        all_agent_models = [str(ac.get("model") or "") for ac in payload.get("agent_configs", [])]
+        session_model = str(payload.get("model") or "")
+        primary_model_hint = next((m for m in all_agent_models if m), session_model)
         if api_key:
-            os.environ["GEMINI_API_KEY"] = api_key
-            os.environ["GOOGLE_API_KEY"] = api_key
-            os.environ["OPENAI_API_KEY"] = api_key
-            os.environ["ANTHROPIC_API_KEY"] = api_key
+            # Detect by prefix first
+            if api_key.startswith("AIza"):
+                os.environ["GEMINI_API_KEY"] = api_key
+                os.environ["GOOGLE_API_KEY"] = api_key
+            elif api_key.startswith("gsk_"):
+                os.environ["GROQ_API_KEY"] = api_key
+            
+            # Then check model hint to fill in the gaps
+            is_groq = "groq/" in primary_model_hint or api_key.startswith("gsk_")
+            is_gemini = "gemini" in primary_model_hint or api_key.startswith("AIza")
+            is_openrouter = "openrouter/" in primary_model_hint or api_key.startswith("sk-or-")
+            
+            if is_gemini:
+                os.environ["GEMINI_API_KEY"] = api_key
+                os.environ["GOOGLE_API_KEY"] = api_key
+            if is_groq:
+                os.environ["GROQ_API_KEY"] = api_key
+            if is_openrouter:
+                os.environ["OPENROUTER_API_KEY"] = api_key
+            
+            # Default to OpenAI key if it's not a Groq key (to avoid Groq conflict)
+            if not api_key.startswith("gsk_"):
+                os.environ["OPENAI_API_KEY"] = api_key
+            
+            if "claude" in primary_model_hint:
+                os.environ["ANTHROPIC_API_KEY"] = api_key
+
 
         if payload.get("type") == "generate_agent_prompt":
             agent_role = payload.get("agent_role", "Agent")
@@ -210,6 +276,25 @@ async def websocket_endpoint(websocket: WebSocket):
             elif role == "system":
                 lc_messages.append(SystemMessage(content=content))
 
+        # 3.5. Inject Multimodal Images into the last HumanMessage (skip for Ollama - no vision API)
+        images = payload.get("images", [])
+        is_ollama_model = any(
+            (ac.get("model") or "").startswith("ollama/")
+            for ac in payload.get("agent_configs", [])
+        )
+        if images and lc_messages and isinstance(lc_messages[-1], HumanMessage) and not is_ollama_model:
+            last_content = lc_messages[-1].content
+            content_blocks: list = [{"type": "text", "text": str(last_content)}]
+            for img in images:
+                img_data: str = img.get("data", "")
+                if img_data.startswith("data:"):
+                    # LangChain image_url accepts data URLs for OpenAI & Gemini
+                    content_blocks.append({
+                        "type": "image_url",
+                        "image_url": {"url": img_data}
+                    })
+            lc_messages[-1] = HumanMessage(content=content_blocks)
+
         agent_configs = payload.get("agent_configs", [])
         if payload.get("stage") == "execution":
             agent_configs, unified_model, unified_key = normalize_execution_agent_configs(
@@ -218,10 +303,22 @@ async def websocket_endpoint(websocket: WebSocket):
                 api_key,
             )
             if unified_key:
-                os.environ["GEMINI_API_KEY"] = unified_key
-                os.environ["GOOGLE_API_KEY"] = unified_key
-                os.environ["OPENAI_API_KEY"] = unified_key
-                os.environ["ANTHROPIC_API_KEY"] = unified_key
+                # Route unified key to the correct provider
+                if unified_model.startswith("groq/"):
+                    os.environ["GROQ_API_KEY"] = unified_key
+                elif unified_model.startswith("openrouter/"):
+                    os.environ["OPENROUTER_API_KEY"] = unified_key
+                elif unified_model.startswith("gemini"):
+                    os.environ["GEMINI_API_KEY"] = unified_key
+                    os.environ["GOOGLE_API_KEY"] = unified_key
+                elif unified_model.startswith("claude"):
+                    os.environ["ANTHROPIC_API_KEY"] = unified_key
+                else:
+                    os.environ["OPENAI_API_KEY"] = unified_key
+                    os.environ["GEMINI_API_KEY"] = unified_key
+                    os.environ["GOOGLE_API_KEY"] = unified_key
+                    os.environ["GROQ_API_KEY"] = unified_key
+                    os.environ["OPENROUTER_API_KEY"] = unified_key
 
         # 4. Build the initial WorkspaceState – pydantic will fill defaults for missing fields
         state = WorkspaceState(
@@ -251,22 +348,31 @@ async def websocket_endpoint(websocket: WebSocket):
         # 5. Stream events from the LangGraph graph
         content_was_sent = False
         stopped_early = False
+        latest_execution_started = state.get("execution_started", False)
+        latest_execution_queue = list(state.get("execution_queue", []) or [])
+        latest_execution_cursor = state.get("execution_cursor", 0)
 
         async for event in graph.astream_events(state, config=GRAPH_RUNTIME_CONFIG, version="v2"):
             if session_id and session_id in STOP_REQUESTED:
                 STOP_REQUESTED.discard(session_id)
                 stopped_early = True
+                finished_state = build_finished_execution_state(
+                    latest_execution_started,
+                    latest_execution_queue,
+                    latest_execution_cursor,
+                )
                 try:
                     await websocket.send_text(json.dumps({
                         "type": "replace",
                         "content": "⏹️ 已停止這一輪 execution。",
                         "node": "System Interface",
                         "stage": state.get("stage"),
-                        "execution_started": state.get("execution_started"),
-                        "execution_queue": state.get("execution_queue"),
-                        "execution_cursor": state.get("execution_cursor"),
+                        **finished_state,
                     }))
-                    await websocket.send_text(json.dumps({"type": "finish"}))
+                    await websocket.send_text(json.dumps({
+                        "type": "finish",
+                        **finished_state,
+                    }))
                 except Exception:
                     pass
                 break
@@ -293,6 +399,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     content = normalize_content(getattr(last_msg, "content", None))
                     if content:
                         sender = output.get("sender", "System")
+                        latest_execution_started = output.get("execution_started", latest_execution_started)
+                        latest_execution_queue = list(output.get("execution_queue", latest_execution_queue) or [])
+                        latest_execution_cursor = output.get("execution_cursor", latest_execution_cursor)
                         print(f"[WS DEBUG]   -> Sending replace: sender={sender}, content_len={len(str(content))}")
                         await websocket.send_text(json.dumps({
                             "type": "replace",
@@ -334,6 +443,9 @@ async def websocket_endpoint(websocket: WebSocket):
                                 "execution_queue": result.get("execution_queue"),
                                 "execution_cursor": result.get("execution_cursor"),
                             }))
+                            latest_execution_started = result.get("execution_started", latest_execution_started)
+                            latest_execution_queue = list(result.get("execution_queue", latest_execution_queue) or [])
+                            latest_execution_cursor = result.get("execution_cursor", latest_execution_cursor)
                             content_was_sent = True
                             break
             except Exception as fallback_err:
@@ -351,7 +463,15 @@ async def websocket_endpoint(websocket: WebSocket):
                 "node": "System",
             }))
 
-        await websocket.send_text(json.dumps({"type": "finish"}))
+        finished_state = build_finished_execution_state(
+            latest_execution_started,
+            latest_execution_queue,
+            latest_execution_cursor,
+        )
+        await websocket.send_text(json.dumps({
+            "type": "finish",
+            **finished_state,
+        }))
 
         # 6. Handle edits from the Next.js frontend
         async for raw_edit_data in websocket.iter_text():

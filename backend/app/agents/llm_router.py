@@ -129,9 +129,47 @@ def get_llm(model_str: str, temperature: float = 0.7) -> BaseChatModel:
         )
     elif model_str.startswith("gemini"):
         from langchain_google_genai import ChatGoogleGenerativeAI
+        key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
+        print(f"[LLM DEBUG] Creating ChatGoogleGenerativeAI with model={model_str}, key_prefix={key[:8] if key else 'None'}")
         return ChatGoogleGenerativeAI(
             model=model_str, 
-            temperature=temperature
+            temperature=temperature,
+            google_api_key=key
+        )
+    elif model_str.startswith("groq/"):
+        model_name = model_str.replace("groq/", "")
+        groq_api_key = os.getenv("GROQ_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+        try:
+            from langchain_groq import ChatGroq
+            return ChatGroq(
+                model=model_name,
+                temperature=temperature,
+                api_key=groq_api_key,
+            )
+        except ImportError:
+            # Fallback: use ChatOpenAI pointing at Groq's OpenAI-compatible endpoint
+            from langchain_openai import ChatOpenAI
+            return ChatOpenAI(
+                model=model_name,
+                temperature=temperature,
+                openai_api_key=groq_api_key,
+                openai_api_base="https://api.groq.com/openai/v1",
+                streaming=True,
+            )
+    elif model_str.startswith("openrouter/"):
+        model_name = model_str.replace("openrouter/", "")
+        openrouter_api_key = os.getenv("OPENROUTER_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(
+            model=model_name,
+            temperature=temperature,
+            openai_api_key=openrouter_api_key,
+            openai_api_base="https://openrouter.ai/api/v1",
+            streaming=True,
+            default_headers={
+                "HTTP-Referer": "https://github.com/rlong/multi-agent-workspace",
+                "X-Title": "Multi-Agent Workspace",
+            },
         )
     else:
         # Default to OpenAI

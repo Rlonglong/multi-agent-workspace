@@ -43,6 +43,7 @@ def cleanup_workspace_files(filepaths: list[str]) -> list[str]:
 
 
 def reset_workspace_dir() -> None:
+    print(f"[AGENT WORKSPACE] Resetting workspace at {WORKSPACE_DIR}")
     for entry in os.listdir(WORKSPACE_DIR):
         full_path = os.path.join(WORKSPACE_DIR, entry)
         if os.path.isdir(full_path):
@@ -63,6 +64,7 @@ def write_code_file(filepath: str, content: str) -> str:
     os.makedirs(os.path.dirname(full_path), exist_ok=True)
     with open(full_path, 'w', encoding='utf-8') as f:
         f.write(content)
+    print(f"[AGENT WORKSPACE] Wrote file: {os.path.relpath(full_path, WORKSPACE_DIR)}")
     return f"Successfully wrote file: {os.path.relpath(full_path, WORKSPACE_DIR)}"
 
 @tool
@@ -100,11 +102,11 @@ def execute_playwright_qa(script_code: str) -> str:
         
     try:
         result = subprocess.run(['python3', temp_name], capture_output=True, text=True, timeout=30)
-        output = f"STDOUT:\\n{result.stdout}\\nSTDERR:\\n{result.stderr}"
+        output = f"STDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
         if result.returncode == 0:
-            return f"✅ Playwright Test Passed!\\n{output}"
+            return f"✅ Playwright Test Passed!\n{output}"
         else:
-            return f"❌ Playwright Test Failed (Code {result.returncode}):\\n{output}"
+            return f"❌ Playwright Test Failed (Code {result.returncode}):\n{output}"
     except subprocess.TimeoutExpired:
         return "❌ Playwright Execution Timeout (exceeded 30 seconds)."
     except Exception as e:
